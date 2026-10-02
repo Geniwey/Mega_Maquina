@@ -23,9 +23,23 @@ COLUMNAS_REQUERIDAS = [
     "ENLACE_HOTMART",
 ]
 
-# llama-3.1-70b-versatile fue retirado por Groq. Se usa el sucesor oficial.
-# Puedes cambiarlo sin tocar el código con la variable de entorno GROQ_MODEL.
-MODELO = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+# Groq retiró los Llama (3.1 70B, y 3.3 70B ya solo es Enterprise).
+# El script pregunta a Groq qué modelos tienes disponibles y elige el mejor
+# de esta lista (orden de preferencia). Si uno falla con 404/403, salta al siguiente.
+# Para forzar uno concreto: variable de entorno GROQ_MODEL.
+MODELOS_PREFERIDOS = [
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
+    "llama-3.3-70b-versatile",
+    "qwen/qwen3-32b",
+    "moonshotai/kimi-k2-instruct-0905",
+    "meta-llama/llama-4-maverick-17b-128e-instruct",
+    "meta-llama/llama-4-scout-17b-16e-instruct",
+    "llama-3.1-8b-instant",
+]
+
+# Modelos que NO sirven para generar texto
+PALABRAS_EXCLUIDAS = ("whisper", "orpheus", "guard", "safeguard", "tts", "embed", "compound")
 
 ARCHIVO_SALIDA = "contenido_hoy.json"
 
@@ -168,42 +182,89 @@ def validar_json(texto: str) -> dict:
     return datos
 
 
-def generar_contenido(client: Groq, prompt: str) -> dict:
+def elegir_modelos(client: Groq) -> list:
+    """Devuelve la lista de modelos a probar, de mejor a peor, según lo disponible en tu cuenta."""
+    forzado = os.environ.get("GROQ_MODEL", "").strip()
+    candidatos = [forzado] if forzado else []
+
+    try:
+        disponibles = [m.id for m in client.models.list().data]
+        log.info(f"🔎 Modelos disponibles en tu cuenta: {len(disponibles)}")
+        utiles = [m for m in disponibles
+                  if not any(p in m.lower() for p in PALABRAS_EXCLUIDAS)]
+        candidatos += [m for m in MODELOS_PREFERIDOS if m in utiles]
+        # Cualquier otro modelo de texto disponible, como último recurso
+        candidatos += [m for m in utiles if m not in candidatos]
+    except Exception as e:
+        log.warning(f"⚠️ No se pudo listar modelos ({type(e).__name__}: {e}). Uso lista por defecto.")
+        candidatos += MODELOS_PREFERIDOS
+
+    # Quitar duplicados manteniendo el orden
+    vistos, final = set(), []
+    for m in candidatos:
+        if m and m not in vistos:
+            vistos.add(m)
+            final.append(m)
+
+    if not final:
+        raise ErrorFatal("No hay ningún modelo de texto disponible en tu cuenta de Groq.")
+    log.info(f"🏆 Orden de modelos a probar: {final[:4]}{' ...' if len(final) > 4 else ''}")
+    return final
+
+
+def modelo_no_disponible(e: Exception) -> bool:
+    """404/403 o 400 que habla del modelo: toca probar otro modelo."""
+    if isinstance(e, (groq.NotFoundError, groq.PermissionDeniedError)):
+        return True
+    if isinstance(e, groq.BadRequestError):
+        msg = str(e).lower()
+        return "model" in msg and any(x in msg for x in ("decommission", "not exist", "not supported", "deprecated"))
+    return False
+
+
+def generar_contenido(client: Groq, prompt: str, modelos: list) -> tuple:
+    """Prueba cada modelo (con reintentos) hasta conseguir un JSON válido. Devuelve (datos, modelo)."""
     ultimo_error = None
-    for intento in range(1, MAX_REINTENTOS + 1):
-        try:
-            log.info(f"🧠 Generando copy con {MODELO} (intento {intento}/{MAX_REINTENTOS})...")
-            chat_completion = client.chat.completions.create(
-                messages=[{"role": "user", "content": prompt}],
-                model=MODELO,
-                response_format={"type": "json_object"},
-                temperature=0.7,
-            )
-            texto = chat_completion.choices[0].message.content
-            datos = validar_json(texto)
-            log.info("✅ JSON recibido y validado correctamente.")
-            return datos
+    for modelo in modelos:
+        for intento in range(1, MAX_REINTENTOS + 1):
+            try:
+                log.info(f"🧠 Generando copy con {modelo} (intento {intento}/{MAX_REINTENTOS})...")
+                chat_completion = client.chat.completions.create(
+                    messages=[{"role": "user", "content": prompt}],
+                    model=modelo,
+                    response_format={"type": "json_object"},
+                    temperature=0.7,
+                )
+                texto = chat_completion.choices[0].message.content
+                datos = validar_json(texto)
+                log.info(f"✅ JSON recibido y validado correctamente con {modelo}.")
+                return datos, modelo
 
-        except (json.JSONDecodeError, ValueError) as e:
-            ultimo_error = e
-            log.warning(f"⚠️ JSON inválido: {e}")
+            except (json.JSONDecodeError, ValueError) as e:
+                ultimo_error = e
+                log.warning(f"⚠️ JSON inválido: {e}")
 
-        except groq.APIError as e:
-            ultimo_error = e
-            if not es_error_reintentable(e):
-                raise ErrorFatal(f"Error no recuperable de Groq ({type(e).__name__}): {e}")
-            log.warning(f"⚠️ Error temporal de Groq ({type(e).__name__}): {e}")
+            except groq.APIError as e:
+                ultimo_error = e
+                if modelo_no_disponible(e):
+                    log.warning(f"⚠️ Modelo '{modelo}' no disponible ({type(e).__name__}). Pruebo el siguiente...")
+                    break  # pasa al siguiente modelo
+                if not es_error_reintentable(e):
+                    raise ErrorFatal(f"Error no recuperable de Groq ({type(e).__name__}): {e}")
+                log.warning(f"⚠️ Error temporal de Groq ({type(e).__name__}): {e}")
 
-        except (IndexError, AttributeError) as e:
-            ultimo_error = e
-            log.warning(f"⚠️ Respuesta de Groq con formato inesperado: {e}")
+            except (IndexError, AttributeError) as e:
+                ultimo_error = e
+                log.warning(f"⚠️ Respuesta de Groq con formato inesperado: {e}")
 
-        if intento < MAX_REINTENTOS:
-            espera = ESPERA_BASE_SEG * (2 ** (intento - 1))
-            log.info(f"⏳ Reintentando en {espera}s...")
-            time.sleep(espera)
+            if intento < MAX_REINTENTOS:
+                espera = ESPERA_BASE_SEG * (2 ** (intento - 1))
+                log.info(f"⏳ Reintentando en {espera}s...")
+                time.sleep(espera)
+        else:
+            log.warning(f"⚠️ '{modelo}' agotó los reintentos. Pruebo el siguiente modelo...")
 
-    raise ErrorFatal(f"Groq falló tras {MAX_REINTENTOS} intentos. Último error: {ultimo_error}")
+    raise ErrorFatal(f"Ningún modelo funcionó. Último error: {ultimo_error}")
 
 
 # ---------------------------------------------------------------------------
@@ -287,14 +348,15 @@ Devuelve el resultado ESTRICTAMENTE en este formato JSON, sin añadir ningún ot
 }}
 """
 
-    contenido = generar_contenido(client, prompt_nivel_dios)
+    modelos = elegir_modelos(client)
+    contenido, modelo_usado = generar_contenido(client, prompt_nivel_dios, modelos)
 
     # Metadatos útiles para el siguiente paso del pipeline (no alteran el resto del JSON)
     contenido["_meta"] = {
         "producto": nombre,
         "palabra_clave": palabra_clave,
         "enlace_hotmart": enlace,
-        "modelo": MODELO,
+        "modelo": modelo_usado,
     }
 
     guardar_json(contenido, ARCHIVO_SALIDA)
