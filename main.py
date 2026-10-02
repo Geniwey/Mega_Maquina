@@ -59,6 +59,18 @@ class ErrorFatal(Exception):
     """Error que impide continuar el pipeline."""
 
 
+# Caracteres invisibles que se cuelan al copiar/pegar en Google Sheets
+CARACTERES_INVISIBLES = ["\u2060", "\u200b", "\u200c", "\u200d", "\ufeff", "\u00a0"]
+
+
+def limpiar_texto(valor) -> str:
+    """Quita caracteres invisibles y espacios sobrantes."""
+    texto = str(valor)
+    for c in CARACTERES_INVISIBLES:
+        texto = texto.replace(c, " " if c == "\u00a0" else "")
+    return texto.strip()
+
+
 # ---------------------------------------------------------------------------
 # 1. LECTURA Y VALIDACIÓN DEL CSV
 # ---------------------------------------------------------------------------
@@ -101,7 +113,7 @@ def validar_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         raise ErrorFatal("El DataFrame está vacío.")
 
-    df.columns = [str(c).strip() for c in df.columns]
+    df.columns = [limpiar_texto(c) for c in df.columns]
 
     faltantes = [c for c in COLUMNAS_REQUERIDAS if c not in df.columns]
     if faltantes:
@@ -118,7 +130,7 @@ def validar_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     antes = len(df)
     df = df.dropna(how="any")
     for col in COLUMNAS_REQUERIDAS:
-        df[col] = df[col].astype(str).str.strip()
+        df[col] = df[col].map(limpiar_texto)
         df = df[df[col] != ""]
     descartadas = antes - len(df)
     if descartadas:
