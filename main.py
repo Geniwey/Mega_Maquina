@@ -55,7 +55,7 @@ class ErrorFatal(Exception):
     """Error que impide continuar el pipeline."""
 
 # ---------------------------------------------------------------------------
-# 1. LECTURA Y VALIDACIÓN DEL CSV
+# 1. LECTURA Y VALIDACIÓN DEL CSV (VERSIÓN BLINDADA ANTI-CARACTERES FANTASMA)
 # ---------------------------------------------------------------------------
 def descargar_csv(url: str) -> pd.DataFrame:
     for intento in range(1, MAX_REINTENTOS + 1):
@@ -63,7 +63,16 @@ def descargar_csv(url: str) -> pd.DataFrame:
             log.info(f"📥 Descargando base de datos B2B (intento {intento}/{MAX_REINTENTOS})...")
             resp = requests.get(url, timeout=TIMEOUT_CSV_SEG)
             resp.raise_for_status()
-            df = pd.read_csv(io.StringIO(resp.content.decode("utf-8")))
+            
+            # EL ARREGLO ESTÁ AQUÍ: 
+            # 1. 'utf-8-sig' elimina el carácter invisible (BOM) del principio de la celda A1.
+            # 2. sep=None y engine='python' detecta si Google usa comas o puntos y comas.
+            df = pd.read_csv(
+                io.StringIO(resp.content.decode("utf-8-sig")), 
+                sep=None, 
+                engine='python'
+            )
+            
             log.info(f"✅ CSV descargado: {len(df)} filas.")
             return df
         except Exception as e:
@@ -75,10 +84,14 @@ def descargar_csv(url: str) -> pd.DataFrame:
 def validar_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         raise ErrorFatal("El DataFrame está vacío.")
+    
+    # Limpiamos los nombres de las columnas por si hay espacios en blanco accidentales
     df.columns = [str(c).strip() for c in df.columns]
+    
     for c in COLUMNAS_REQUERIDAS:
         if c not in df.columns:
-            raise ErrorFatal(f"Falta columna obligatoria: {c}")
+            raise ErrorFatal(f"Falta columna obligatoria: '{c}'. Columnas detectadas: {list(df.columns)}")
+            
     df = df[COLUMNAS_REQUERIDAS].dropna().copy()
     return df
 
