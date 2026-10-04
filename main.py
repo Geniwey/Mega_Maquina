@@ -25,7 +25,6 @@ COLUMNAS_REQUERIDAS = [
     "ENLACE_HOTMART",
 ]
 
-MODELO = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
 ARCHIVO_JSON = "contenido_hoy.json"
 ARCHIVO_VIDEO = "video_final.mp4"
 
@@ -55,14 +54,12 @@ class ErrorFatal(Exception):
     """Error que impide continuar el pipeline."""
 
 # ---------------------------------------------------------------------------
-# 1. LECTURA Y VALIDACIÓN DEL CSV (VERSIÓN DEFINITIVA DE TU AYUDANTE)
+# 1. LECTURA Y VALIDACIÓN DEL CSV (BLINDADO ANTI-FANTASMAS)
 # ---------------------------------------------------------------------------
 def limpiar_texto(valor) -> str:
-    """Elimina caracteres invisibles (Word Joiner, zero-width, BOM, NBSP) y espacios."""
     s = str(valor)
-    # Quita todos los caracteres de formato/control Unicode (categoría Cf y Cc)
     s = "".join(ch for ch in s if unicodedata.category(ch) not in ("Cf", "Cc"))
-    s = s.replace("\u00a0", " ")  # espacio duro -> espacio normal
+    s = s.replace("\u00a0", " ")
     return s.strip()
 
 def descargar_csv(url: str) -> pd.DataFrame:
@@ -71,8 +68,6 @@ def descargar_csv(url: str) -> pd.DataFrame:
             log.info(f"📥 Descargando base de datos B2B (intento {intento}/{MAX_REINTENTOS})...")
             resp = requests.get(url, timeout=TIMEOUT_CSV_SEG)
             resp.raise_for_status()
-            
-            # Usamos engine python para auto-detectar separadores
             df = pd.read_csv(io.StringIO(resp.content.decode("utf-8")), sep=None, engine='python')
             log.info(f"✅ CSV descargado: {len(df)} filas crudas.")
             return df
@@ -86,7 +81,6 @@ def validar_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         raise ErrorFatal("El DataFrame está vacío.")
 
-    # Limpia encabezados de caracteres fantasma
     df.columns = [limpiar_texto(c) for c in df.columns]
 
     for c in COLUMNAS_REQUERIDAS:
@@ -94,12 +88,9 @@ def validar_dataframe(df: pd.DataFrame) -> pd.DataFrame:
             raise ErrorFatal(f"Falta columna obligatoria: '{c}'. Columnas detectadas: {list(df.columns)}")
 
     df = df[COLUMNAS_REQUERIDAS].dropna().copy()
-
-    # Limpia también el contenido de las celdas
     for col in COLUMNAS_REQUERIDAS:
         df[col] = df[col].map(limpiar_texto)
 
-    # Descarta filas que hayan quedado vacías tras limpiar
     df = df[(df[COLUMNAS_REQUERIDAS] != "").all(axis=1)]
 
     if df.empty:
@@ -109,15 +100,46 @@ def validar_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # ---------------------------------------------------------------------------
-# 2. GENERACIÓN DE TEXTO CON GROQ
+# 2. RADAR DE MODELOS (TU IDEA BRILLANTE) Y GENERACIÓN CON GROQ
 # ---------------------------------------------------------------------------
-def generar_contenido(client: Groq, prompt: str) -> dict:
+def obtener_mejor_modelo(client: Groq) -> str:
+    log.info("📡 Escaneando modelos disponibles en Groq...")
+    try:
+        modelos_activos = [m.id for m in client.models.list().data]
+        
+        # Orden de preferencia: queremos el más listo primero (Llama 70B o Mixtral)
+        preferencias = [
+            "llama-3.1-70b-versatile",
+            "llama3-70b-8192",
+            "mixtral-8x7b-32768",
+            "llama-3.1-8b-instant",
+            "llama3-8b-8192"
+        ]
+        
+        for pref in preferencias:
+            if pref in modelos_activos:
+                log.info(f"⭐ Radar fijado en el mejor modelo disponible: {pref}")
+                return pref
+                
+        # Si por algún motivo cambian todos los nombres, pilla el primero que tenga 'llama'
+        for m in modelos_activos:
+            if 'llama' in m.lower():
+                log.warning(f"⚠️ Modelo preferido no encontrado. Usando alternativa Llama: {m}")
+                return m
+                
+        log.warning(f"⚠️ Usando fallback genérico: {modelos_activos[0]}")
+        return modelos_activos[0]
+    except Exception as e:
+        log.error(f"❌ Fallo en el radar de modelos: {e}. Forzando llama3-70b-8192")
+        return "llama3-70b-8192"
+
+def generar_contenido(client: Groq, prompt: str, modelo_elegido: str) -> dict:
     for intento in range(1, MAX_REINTENTOS + 1):
         try:
-            log.info(f"🧠 Generando copy con {MODELO} (intento {intento}/{MAX_REINTENTOS})...")
+            log.info(f"🧠 Generando copy con {modelo_elegido} (intento {intento}/{MAX_REINTENTOS})...")
             chat_completion = client.chat.completions.create(
                 messages=[{"role": "user", "content": prompt}],
-                model=MODELO,
+                model=modelo_elegido,
                 response_format={"type": "json_object"},
                 temperature=0.7,
             )
@@ -145,15 +167,13 @@ async def generar_voz_audio(texto: str, archivo_salida: str):
 
 def fabricar_video_mp4(script_texto: str):
     audio_path = "temp_voice.mp3"
-    
     asyncio.run(generar_voz_audio(script_texto, audio_path))
     
-    log.info("🎬 Descargando y renderizando vídeo MP4 con MoviePy...")
+    log.info("🎬 Descargando fondo y renderizando vídeo MP4 con MoviePy...")
     
     bg_url = "https://assets.mixkit.co/videos/preview/mixkit-cargo-ship-in-the-sea-41584-large.mp4"
     bg_path = "temp_bg.mp4"
     
-    # ARREGLO DE SEGURIDAD INCLUIDO AQUÍ
     resp = requests.get(bg_url, stream=True, timeout=60)
     resp.raise_for_status()
     with open(bg_path, "wb") as f:
@@ -203,6 +223,9 @@ def main():
     log.info(f"🎯 Producto seleccionado: {nombre}")
 
     client = Groq(api_key=api_key, timeout=TIMEOUT_GROQ_SEG, max_retries=0)
+    
+    # --- EL RADAR EN ACCIÓN ---
+    mejor_modelo = obtener_mejor_modelo(client)
 
     prompt = f"""
 Actúa como un copywriter B2B experto en logística y comercio internacional.
@@ -212,8 +235,8 @@ Devuelve estrictamente un JSON con estas claves:
 video_script, tiktok_data (caption, hashtags), ig_reel_data (caption, hashtags), youtube_seo (title, description), pinterest_pins (array de objetos con text_on_image), linkedin_post.
 """
 
-    contenido = generar_contenido(client, prompt)
-    contenido["_meta"] = {"producto": nombre, "enlace": enlace}
+    contenido = generar_contenido(client, prompt, mejor_modelo)
+    contenido["_meta"] = {"producto": nombre, "enlace": enlace, "modelo_usado": mejor_modelo}
 
     with open(ARCHIVO_JSON, "w", encoding="utf-8") as f:
         json.dump(contenido, f, ensure_ascii=False, indent=2)
