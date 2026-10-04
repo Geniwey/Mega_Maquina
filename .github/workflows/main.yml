@@ -1,7 +1,7 @@
 name: El Motor de la Mega Maquina
 
 on:
-  workflow_dispatch: # Esto crea un boton para encenderlo a mano
+  workflow_dispatch:
 
 jobs:
   arrancar_cerebro:
@@ -16,12 +16,21 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: 📦 Instalar librerías
+      - name: 📦 Instalar herramientas multimedia y librerías
         run: |
-          pip install pandas groq requests
+          sudo apt-get update && sudo apt-get install -y ffmpeg
+          pip install pandas groq requests edge-tts moviepy pillow
 
-      - name: 🚀 Ejecutar la Inteligencia Artificial
+      - name: 🚀 Ejecutar la Fábrica de Contenido
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: |
           python main.py
+
+      - name: 🗂️ Entregar Vídeos y Textos al Usuario
+        uses: actions/upload-artifact@v4
+        with:
+          name: Paquete_Contenido_Hoy
+          path: |
+            contenido_hoy.json
+            video_final.mp4
