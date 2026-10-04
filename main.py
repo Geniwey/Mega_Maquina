@@ -5,9 +5,9 @@ import json
 import time
 import asyncio
 import logging
+import unicodedata
 import requests
 import pandas as pd
-import groq
 from groq import Groq
 import edge_tts
 from moviepy.editor import VideoFileClip, AudioFileClip
@@ -55,8 +55,16 @@ class ErrorFatal(Exception):
     """Error que impide continuar el pipeline."""
 
 # ---------------------------------------------------------------------------
-# 1. LECTURA Y VALIDACIÓN DEL CSV (VERSIÓN BLINDADA ANTI-CARACTERES FANTASMA)
+# 1. LECTURA Y VALIDACIÓN DEL CSV (VERSIÓN DEFINITIVA DE TU AYUDANTE)
 # ---------------------------------------------------------------------------
+def limpiar_texto(valor) -> str:
+    """Elimina caracteres invisibles (Word Joiner, zero-width, BOM, NBSP) y espacios."""
+    s = str(valor)
+    # Quita todos los caracteres de formato/control Unicode (categoría Cf y Cc)
+    s = "".join(ch for ch in s if unicodedata.category(ch) not in ("Cf", "Cc"))
+    s = s.replace("\u00a0", " ")  # espacio duro -> espacio normal
+    return s.strip()
+
 def descargar_csv(url: str) -> pd.DataFrame:
     for intento in range(1, MAX_REINTENTOS + 1):
         try:
@@ -64,16 +72,9 @@ def descargar_csv(url: str) -> pd.DataFrame:
             resp = requests.get(url, timeout=TIMEOUT_CSV_SEG)
             resp.raise_for_status()
             
-            # EL ARREGLO ESTÁ AQUÍ: 
-            # 1. 'utf-8-sig' elimina el carácter invisible (BOM) del principio de la celda A1.
-            # 2. sep=None y engine='python' detecta si Google usa comas o puntos y comas.
-            df = pd.read_csv(
-                io.StringIO(resp.content.decode("utf-8-sig")), 
-                sep=None, 
-                engine='python'
-            )
-            
-            log.info(f"✅ CSV descargado: {len(df)} filas.")
+            # Usamos engine python para auto-detectar separadores
+            df = pd.read_csv(io.StringIO(resp.content.decode("utf-8")), sep=None, engine='python')
+            log.info(f"✅ CSV descargado: {len(df)} filas crudas.")
             return df
         except Exception as e:
             log.warning(f"⚠️ Fallo leyendo CSV: {e}")
@@ -84,15 +85,27 @@ def descargar_csv(url: str) -> pd.DataFrame:
 def validar_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         raise ErrorFatal("El DataFrame está vacío.")
-    
-    # Limpiamos los nombres de las columnas por si hay espacios en blanco accidentales
-    df.columns = [str(c).strip() for c in df.columns]
-    
+
+    # Limpia encabezados de caracteres fantasma
+    df.columns = [limpiar_texto(c) for c in df.columns]
+
     for c in COLUMNAS_REQUERIDAS:
         if c not in df.columns:
             raise ErrorFatal(f"Falta columna obligatoria: '{c}'. Columnas detectadas: {list(df.columns)}")
-            
+
     df = df[COLUMNAS_REQUERIDAS].dropna().copy()
+
+    # Limpia también el contenido de las celdas
+    for col in COLUMNAS_REQUERIDAS:
+        df[col] = df[col].map(limpiar_texto)
+
+    # Descarta filas que hayan quedado vacías tras limpiar
+    df = df[(df[COLUMNAS_REQUERIDAS] != "").all(axis=1)]
+
+    if df.empty:
+        raise ErrorFatal("No quedan filas válidas tras la limpieza.")
+
+    log.info(f"✅ {len(df)} fila(s) válida(s) tras validar.")
     return df
 
 # ---------------------------------------------------------------------------
@@ -135,12 +148,14 @@ def fabricar_video_mp4(script_texto: str):
     
     asyncio.run(generar_voz_audio(script_texto, audio_path))
     
-    log.info("🎬 Renderizando vídeo MP4 con MoviePy...")
+    log.info("🎬 Descargando y renderizando vídeo MP4 con MoviePy...")
     
     bg_url = "https://assets.mixkit.co/videos/preview/mixkit-cargo-ship-in-the-sea-41584-large.mp4"
     bg_path = "temp_bg.mp4"
     
-    resp = requests.get(bg_url, stream=True)
+    # ARREGLO DE SEGURIDAD INCLUIDO AQUÍ
+    resp = requests.get(bg_url, stream=True, timeout=60)
+    resp.raise_for_status()
     with open(bg_path, "wb") as f:
         for chunk in resp.iter_content(chunk_size=1024):
             if chunk:
