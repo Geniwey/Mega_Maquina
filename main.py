@@ -10,7 +10,7 @@ import pandas as pd
 import groq
 from groq import Groq
 import edge_tts
-from moviepy.editor import VideoFileClip, AudioFileClip, TextClip, CompositeVideoClip
+from moviepy.editor import VideoFileClip, AudioFileClip
 
 # ---------------------------------------------------------------------------
 # CONFIGURACIÓN
@@ -113,7 +113,6 @@ def generar_contenido(client: Groq, prompt: str) -> dict:
 # ---------------------------------------------------------------------------
 async def generar_voz_audio(texto: str, archivo_salida: str):
     log.info("🎙️ Sintetizando voz en off profesional (Edge TTS)...")
-    # Voz en español neutro/peninsular corporativa (AlvaroNeural o SergioNeural)
     comunicador = edge_tts.Communicate(texto, "es-ES-AlvaroNeural")
     await comunicador.save(archivo_salida)
     log.info("✅ Audio de voz generado.")
@@ -121,12 +120,10 @@ async def generar_voz_audio(texto: str, archivo_salida: str):
 def fabricar_video_mp4(script_texto: str):
     audio_path = "temp_voice.mp3"
     
-    # 1. Generar la voz en off asíncrona
     asyncio.run(generar_voz_audio(script_texto, audio_path))
     
     log.info("🎬 Renderizando vídeo MP4 con MoviePy...")
     
-    # Descargar un vídeo de fondo genérico de puertos/logística libre de Pexels/GitHub para pruebas
     bg_url = "https://assets.mixkit.co/videos/preview/mixkit-cargo-ship-in-the-sea-41584-large.mp4"
     bg_path = "temp_bg.mp4"
     
@@ -136,15 +133,12 @@ def fabricar_video_mp4(script_texto: str):
             if chunk:
                 f.write(chunk)
                 
-    # Cargar elementos con MoviePy
     audio_clip = AudioFileClip(audio_path)
     duracion = audio_clip.duration
     
-    # Cortar o buclear el vídeo de fondo para que dure lo mismo que la voz
     video_fondo = VideoFileClip(bg_path).subclip(0, min(duracion, 60))
     video_fondo = video_fondo.set_audio(audio_clip)
     
-    # Exportar el vídeo final optimizado para formato vertical (Reels/TikTok) o estándar
     video_fondo.write_videofile(
         ARCHIVO_VIDEO,
         fps=24,
@@ -154,7 +148,6 @@ def fabricar_video_mp4(script_texto: str):
         logger=None
     )
     
-    # Limpiar archivos temporales
     audio_clip.close()
     video_fondo.close()
     if os.path.exists(audio_path): os.remove(audio_path)
@@ -197,7 +190,6 @@ video_script, tiktok_data (caption, hashtags), ig_reel_data (caption, hashtags),
     with open(ARCHIVO_JSON, "w", encoding="utf-8") as f:
         json.dump(contenido, f, ensure_ascii=False, indent=2)
 
-    # FABRICAR EL VÍDEO REAL A PARTIR DEL SCRIPT GENERADO
     guion_voz = contenido["video_script"]
     fabricar_video_mp4(guion_voz)
 
