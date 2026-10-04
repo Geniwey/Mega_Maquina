@@ -19,7 +19,7 @@ jobs:
       - name: 📦 Instalar herramientas multimedia y librerías
         run: |
           sudo apt-get update && sudo apt-get install -y ffmpeg
-          pip install pandas groq requests edge-tts moviepy pillow
+          pip install pandas groq requests edge-tts moviepy==1.0.3 pillow
 
       - name: 🚀 Ejecutar la Fábrica de Contenido
         env:
