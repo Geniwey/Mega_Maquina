@@ -3,12 +3,14 @@ import io
 import sys
 import json
 import time
+import asyncio
 import logging
-
 import requests
 import pandas as pd
 import groq
 from groq import Groq
+import edge_tts
+from moviepy.editor import VideoFileClip, AudioFileClip, TextClip, CompositeVideoClip
 
 # ---------------------------------------------------------------------------
 # CONFIGURACIÓN
@@ -23,28 +25,12 @@ COLUMNAS_REQUERIDAS = [
     "ENLACE_HOTMART",
 ]
 
-# Groq retiró los Llama (3.1 70B, y 3.3 70B ya solo es Enterprise).
-# El script pregunta a Groq qué modelos tienes disponibles y elige el mejor
-# de esta lista (orden de preferencia). Si uno falla con 404/403, salta al siguiente.
-# Para forzar uno concreto: variable de entorno GROQ_MODEL.
-MODELOS_PREFERIDOS = [
-    "openai/gpt-oss-120b",
-    "openai/gpt-oss-20b",
-    "llama-3.3-70b-versatile",
-    "qwen/qwen3-32b",
-    "moonshotai/kimi-k2-instruct-0905",
-    "meta-llama/llama-4-maverick-17b-128e-instruct",
-    "meta-llama/llama-4-scout-17b-16e-instruct",
-    "llama-3.1-8b-instant",
-]
-
-# Modelos que NO sirven para generar texto
-PALABRAS_EXCLUIDAS = ("whisper", "orpheus", "guard", "safeguard", "tts", "embed", "compound")
-
-ARCHIVO_SALIDA = "contenido_hoy.json"
+MODELO = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+ARCHIVO_JSON = "contenido_hoy.json"
+ARCHIVO_VIDEO = "video_final.mp4"
 
 MAX_REINTENTOS = 3
-ESPERA_BASE_SEG = 5          # 5s, 10s, 20s...
+ESPERA_BASE_SEG = 5
 TIMEOUT_CSV_SEG = 30
 TIMEOUT_GROQ_SEG = 60
 
@@ -57,9 +43,6 @@ CLAVES_JSON_ESPERADAS = [
     "linkedin_post",
 ]
 
-# ---------------------------------------------------------------------------
-# LOGS
-# ---------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)-8s | %(message)s",
@@ -68,310 +51,161 @@ logging.basicConfig(
 )
 log = logging.getLogger("mega_maquina")
 
-
 class ErrorFatal(Exception):
     """Error que impide continuar el pipeline."""
-
-
-# Caracteres invisibles que se cuelan al copiar/pegar en Google Sheets
-CARACTERES_INVISIBLES = ["\u2060", "\u200b", "\u200c", "\u200d", "\ufeff", "\u00a0"]
-
-
-def limpiar_texto(valor) -> str:
-    """Quita caracteres invisibles y espacios sobrantes."""
-    texto = str(valor)
-    for c in CARACTERES_INVISIBLES:
-        texto = texto.replace(c, " " if c == "\u00a0" else "")
-    return texto.strip()
-
 
 # ---------------------------------------------------------------------------
 # 1. LECTURA Y VALIDACIÓN DEL CSV
 # ---------------------------------------------------------------------------
 def descargar_csv(url: str) -> pd.DataFrame:
-    """Descarga el CSV con timeout y reintentos."""
-    ultimo_error = None
     for intento in range(1, MAX_REINTENTOS + 1):
         try:
             log.info(f"📥 Descargando base de datos B2B (intento {intento}/{MAX_REINTENTOS})...")
             resp = requests.get(url, timeout=TIMEOUT_CSV_SEG)
             resp.raise_for_status()
-
-            contenido_tipo = resp.headers.get("Content-Type", "")
-            if "text/html" in contenido_tipo.lower():
-                raise ErrorFatal(
-                    "Google devolvió HTML en vez de CSV. "
-                    "Comprueba que la hoja es pública ('Cualquiera con el enlace')."
-                )
-
             df = pd.read_csv(io.StringIO(resp.content.decode("utf-8")))
-            log.info(f"✅ CSV descargado: {len(df)} filas, {len(df.columns)} columnas.")
+            log.info(f"✅ CSV descargado: {len(df)} filas.")
             return df
-
-        except ErrorFatal:
-            raise
-        except (requests.RequestException, pd.errors.ParserError,
-                pd.errors.EmptyDataError, UnicodeDecodeError) as e:
-            ultimo_error = e
-            log.warning(f"⚠️ Fallo leyendo el CSV: {type(e).__name__}: {e}")
+        except Exception as e:
+            log.warning(f"⚠️ Fallo leyendo CSV: {e}")
             if intento < MAX_REINTENTOS:
-                espera = ESPERA_BASE_SEG * (2 ** (intento - 1))
-                log.info(f"⏳ Reintentando en {espera}s...")
-                time.sleep(espera)
-
-    raise ErrorFatal(f"No se pudo leer el CSV tras {MAX_REINTENTOS} intentos: {ultimo_error}")
-
+                time.sleep(ESPERA_BASE_SEG * (2 ** (intento - 1)))
+    raise ErrorFatal("No se pudo leer el CSV.")
 
 def validar_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-    """Valida que el DataFrame no esté vacío y tenga las columnas requeridas."""
     if df is None or df.empty:
         raise ErrorFatal("El DataFrame está vacío.")
-
-    df.columns = [limpiar_texto(c) for c in df.columns]
-
-    faltantes = [c for c in COLUMNAS_REQUERIDAS if c not in df.columns]
-    if faltantes:
-        raise ErrorFatal(
-            f"Faltan columnas obligatorias: {faltantes}. "
-            f"Columnas encontradas: {list(df.columns)}"
-        )
-
-    extras = [c for c in df.columns if c not in COLUMNAS_REQUERIDAS]
-    if extras:
-        log.info(f"ℹ️ Columnas extra ignoradas: {extras}")
-
-    df = df[COLUMNAS_REQUERIDAS].copy()
-    antes = len(df)
-    df = df.dropna(how="any")
-    for col in COLUMNAS_REQUERIDAS:
-        df[col] = df[col].map(limpiar_texto)
-        df = df[df[col] != ""]
-    descartadas = antes - len(df)
-    if descartadas:
-        log.warning(f"⚠️ {descartadas} filas descartadas por tener campos vacíos.")
-
-    if df.empty:
-        raise ErrorFatal("No quedan filas válidas tras la limpieza.")
-
-    log.info(f"✅ Validación OK: {len(df)} productos utilizables.")
+    df.columns = [str(c).strip() for c in df.columns]
+    for c in COLUMNAS_REQUERIDAS:
+        if c not in df.columns:
+            raise ErrorFatal(f"Falta columna obligatoria: {c}")
+    df = df[COLUMNAS_REQUERIDAS].dropna().copy()
     return df
 
-
 # ---------------------------------------------------------------------------
-# 2. LLAMADA A GROQ CON REINTENTOS Y VALIDACIÓN DE JSON
+# 2. GENERACIÓN DE TEXTO CON GROQ
 # ---------------------------------------------------------------------------
-def es_error_reintentable(e: Exception) -> bool:
-    if isinstance(e, (groq.RateLimitError, groq.APITimeoutError, groq.APIConnectionError,
-                      groq.InternalServerError)):
-        return True
-    if isinstance(e, groq.APIStatusError) and getattr(e, "status_code", 0) >= 500:
-        return True
-    return False
-
-
-def validar_json(texto: str) -> dict:
-    """Parsea y valida la estructura del JSON devuelto por Groq."""
-    if not texto or not texto.strip():
-        raise ValueError("Groq devolvió una respuesta vacía.")
-    datos = json.loads(texto)
-    if not isinstance(datos, dict):
-        raise ValueError("El JSON no es un objeto (dict).")
-    faltan = [k for k in CLAVES_JSON_ESPERADAS if k not in datos]
-    if faltan:
-        raise ValueError(f"Al JSON le faltan claves: {faltan}")
-    return datos
-
-
-def elegir_modelos(client: Groq) -> list:
-    """Devuelve la lista de modelos a probar, de mejor a peor, según lo disponible en tu cuenta."""
-    forzado = os.environ.get("GROQ_MODEL", "").strip()
-    candidatos = [forzado] if forzado else []
-
-    try:
-        disponibles = [m.id for m in client.models.list().data]
-        log.info(f"🔎 Modelos disponibles en tu cuenta: {len(disponibles)}")
-        utiles = [m for m in disponibles
-                  if not any(p in m.lower() for p in PALABRAS_EXCLUIDAS)]
-        candidatos += [m for m in MODELOS_PREFERIDOS if m in utiles]
-        # Cualquier otro modelo de texto disponible, como último recurso
-        candidatos += [m for m in utiles if m not in candidatos]
-    except Exception as e:
-        log.warning(f"⚠️ No se pudo listar modelos ({type(e).__name__}: {e}). Uso lista por defecto.")
-        candidatos += MODELOS_PREFERIDOS
-
-    # Quitar duplicados manteniendo el orden
-    vistos, final = set(), []
-    for m in candidatos:
-        if m and m not in vistos:
-            vistos.add(m)
-            final.append(m)
-
-    if not final:
-        raise ErrorFatal("No hay ningún modelo de texto disponible en tu cuenta de Groq.")
-    log.info(f"🏆 Orden de modelos a probar: {final[:4]}{' ...' if len(final) > 4 else ''}")
-    return final
-
-
-def modelo_no_disponible(e: Exception) -> bool:
-    """404/403 o 400 que habla del modelo: toca probar otro modelo."""
-    if isinstance(e, (groq.NotFoundError, groq.PermissionDeniedError)):
-        return True
-    if isinstance(e, groq.BadRequestError):
-        msg = str(e).lower()
-        return "model" in msg and any(x in msg for x in ("decommission", "not exist", "not supported", "deprecated"))
-    return False
-
-
-def generar_contenido(client: Groq, prompt: str, modelos: list) -> tuple:
-    """Prueba cada modelo (con reintentos) hasta conseguir un JSON válido. Devuelve (datos, modelo)."""
-    ultimo_error = None
-    for modelo in modelos:
-        for intento in range(1, MAX_REINTENTOS + 1):
-            try:
-                log.info(f"🧠 Generando copy con {modelo} (intento {intento}/{MAX_REINTENTOS})...")
-                chat_completion = client.chat.completions.create(
-                    messages=[{"role": "user", "content": prompt}],
-                    model=modelo,
-                    response_format={"type": "json_object"},
-                    temperature=0.7,
-                )
-                texto = chat_completion.choices[0].message.content
-                datos = validar_json(texto)
-                log.info(f"✅ JSON recibido y validado correctamente con {modelo}.")
-                return datos, modelo
-
-            except (json.JSONDecodeError, ValueError) as e:
-                ultimo_error = e
-                log.warning(f"⚠️ JSON inválido: {e}")
-
-            except groq.APIError as e:
-                ultimo_error = e
-                if modelo_no_disponible(e):
-                    log.warning(f"⚠️ Modelo '{modelo}' no disponible ({type(e).__name__}). Pruebo el siguiente...")
-                    break  # pasa al siguiente modelo
-                if not es_error_reintentable(e):
-                    raise ErrorFatal(f"Error no recuperable de Groq ({type(e).__name__}): {e}")
-                log.warning(f"⚠️ Error temporal de Groq ({type(e).__name__}): {e}")
-
-            except (IndexError, AttributeError) as e:
-                ultimo_error = e
-                log.warning(f"⚠️ Respuesta de Groq con formato inesperado: {e}")
-
+def generar_contenido(client: Groq, prompt: str) -> dict:
+    for intento in range(1, MAX_REINTENTOS + 1):
+        try:
+            log.info(f"🧠 Generando copy con {MODELO} (intento {intento}/{MAX_REINTENTOS})...")
+            chat_completion = client.chat.completions.create(
+                messages=[{"role": "user", "content": prompt}],
+                model=MODELO,
+                response_format={"type": "json_object"},
+                temperature=0.7,
+            )
+            texto = chat_completion.choices[0].message.content
+            datos = json.loads(texto)
+            for k in CLAVES_JSON_ESPERADAS:
+                if k not in datos:
+                    raise ValueError(f"Falta clave JSON: {k}")
+            log.info("✅ JSON validado correctamente.")
+            return datos
+        except Exception as e:
+            log.warning(f"⚠️ Error en Groq: {e}")
             if intento < MAX_REINTENTOS:
-                espera = ESPERA_BASE_SEG * (2 ** (intento - 1))
-                log.info(f"⏳ Reintentando en {espera}s...")
-                time.sleep(espera)
-        else:
-            log.warning(f"⚠️ '{modelo}' agotó los reintentos. Pruebo el siguiente modelo...")
-
-    raise ErrorFatal(f"Ningún modelo funcionó. Último error: {ultimo_error}")
-
+                time.sleep(ESPERA_BASE_SEG * (2 ** (intento - 1)))
+    raise ErrorFatal("Groq falló tras varios reintentos.")
 
 # ---------------------------------------------------------------------------
-# 3. GUARDADO SEGURO
+# 3. LA FÁBRICA VISUAL (TEXTO A VIZ / MP4)
 # ---------------------------------------------------------------------------
-def guardar_json(datos: dict, ruta: str) -> None:
-    """Escritura atómica: si algo falla, nunca queda un archivo a medias."""
-    tmp = ruta + ".tmp"
-    try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(datos, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, ruta)
-        log.info(f"💾 Guardado en '{ruta}' ({os.path.getsize(ruta)} bytes).")
-    except OSError as e:
-        raise ErrorFatal(f"No se pudo guardar '{ruta}': {e}")
-    finally:
-        if os.path.exists(tmp):
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
+async def generar_voz_audio(texto: str, archivo_salida: str):
+    log.info("🎙️ Sintetizando voz en off profesional (Edge TTS)...")
+    # Voz en español neutro/peninsular corporativa (AlvaroNeural o SergioNeural)
+    comunicador = edge_tts.Communicate(texto, "es-ES-AlvaroNeural")
+    await comunicador.save(archivo_salida)
+    log.info("✅ Audio de voz generado.")
 
+def fabricar_video_mp4(script_texto: str):
+    audio_path = "temp_voice.mp3"
+    
+    # 1. Generar la voz en off asíncrona
+    asyncio.run(generar_voz_audio(script_texto, audio_path))
+    
+    log.info("🎬 Renderizando vídeo MP4 con MoviePy...")
+    
+    # Descargar un vídeo de fondo genérico de puertos/logística libre de Pexels/GitHub para pruebas
+    bg_url = "https://assets.mixkit.co/videos/preview/mixkit-cargo-ship-in-the-sea-41584-large.mp4"
+    bg_path = "temp_bg.mp4"
+    
+    resp = requests.get(bg_url, stream=True)
+    with open(bg_path, "wb") as f:
+        for chunk in resp.iter_content(chunk_size=1024):
+            if chunk:
+                f.write(chunk)
+                
+    # Cargar elementos con MoviePy
+    audio_clip = AudioFileClip(audio_path)
+    duracion = audio_clip.duration
+    
+    # Cortar o buclear el vídeo de fondo para que dure lo mismo que la voz
+    video_fondo = VideoFileClip(bg_path).subclip(0, min(duracion, 60))
+    video_fondo = video_fondo.set_audio(audio_clip)
+    
+    # Exportar el vídeo final optimizado para formato vertical (Reels/TikTok) o estándar
+    video_fondo.write_videofile(
+        ARCHIVO_VIDEO,
+        fps=24,
+        codec="libx264",
+        audio_codec="aac",
+        preset="ultrafast",
+        logger=None
+    )
+    
+    # Limpiar archivos temporales
+    audio_clip.close()
+    video_fondo.close()
+    if os.path.exists(audio_path): os.remove(audio_path)
+    if os.path.exists(bg_path): os.remove(bg_path)
+    
+    log.info(f"✅ ¡Vídeo fabricado con éxito: {ARCHIVO_VIDEO}!")
 
 # ---------------------------------------------------------------------------
 # MAIN
 # ---------------------------------------------------------------------------
-def main() -> None:
-    log.info("🚀 Arrancando la Mega Máquina...")
-
+def main():
+    log.info("🚀 Arrancando la Mega Máquina (Fase Vídeo)...")
     api_key = os.environ.get("GROQ_API_KEY")
     if not api_key:
-        raise ErrorFatal("Falta la variable de entorno GROQ_API_KEY (revisa los Secrets de GitHub).")
+        raise ErrorFatal("Falta GROQ_API_KEY en los Secrets.")
 
-    # 1. LEER EL EXCEL INFINITO
     df = validar_dataframe(descargar_csv(CSV_URL))
+    prod = df.sample(n=1).iloc[0]
+    
+    nombre = prod["NOMBRE_PRODUCTO"]
+    problemas = prod["PROBLEMAS_QUE_RESUELVE"]
+    palabra_clave = prod["PALABRA_CLAVE_MANYCHAT"]
+    enlace = prod["ENLACE_HOTMART"]
 
-    producto_hoy = df.sample(n=1).iloc[0]
-    nombre = producto_hoy["NOMBRE_PRODUCTO"]
-    problemas = producto_hoy["PROBLEMAS_QUE_RESUELVE"]
-    palabra_clave = producto_hoy["PALABRA_CLAVE_MANYCHAT"]
-    enlace = producto_hoy["ENLACE_HOTMART"]
+    log.info(f"🎯 Producto seleccionado: {nombre}")
 
-    log.info(f"🎯 Producto a reventar hoy: {nombre}")
-
-    # 2. CONECTAR CON GROQ (El Cerebro)
-    # max_retries=0: los reintentos los controlamos nosotros para tener logs claros.
     client = Groq(api_key=api_key, timeout=TIMEOUT_GROQ_SEG, max_retries=0)
 
-    prompt_nivel_dios = f"""
-Actúa como un copywriter de respuesta directa y un transitario experto en logística marítima B2B.
-Tu objetivo es vender el producto: '{nombre}'.
-Este producto soluciona: '{problemas}'.
-
-REGLAS INQUEBRANTABLES:
-1. CERO NIÑOS: El gancho de los primeros 3 segundos del vídeo debe filtrar agresivamente. Empieza atacando un dolor de dueños de e-commerce o importadores (ej: pérdida de margen, mercancía bloqueada, sobrecostes sorpresa). No saludes, ve directo a la yugular.
-2. LENGUAJE TÉCNICO PERO VISUAL: Usa términos reales (Demurrage, FOB vs CIF, Despacho, DUA, TARIC, Packing List) pero explica el dolor económico que causan.
-3. SEO TRANSACCIONAL: Los títulos y descripciones para YouTube y Pinterest deben atacar búsquedas de gente que ya tiene un problema aduanero y quiere pagar para solucionarlo.
-4. LLAMADA A LA ACCIÓN (CTA): Termina SIEMPRE exigiendo que comenten la palabra exacta '{palabra_clave}'.
-
-Devuelve el resultado ESTRICTAMENTE en este formato JSON, sin añadir ningún otro texto fuera de las llaves:
-{{
-  "video_script": "Guion exacto para voz en off de 45-60 seg. Gancho brutal de filtro B2B, desarrollo del dolor y CTA directo.",
-  "tiktok_data": {{
-    "caption": "Título corto y agresivo para el algoritmo",
-    "hashtags": "#ImportacionChina #Logistica #Incoterms #Aduanas #Ecommerce"
-  }},
-  "ig_reel_data": {{
-    "caption": "Texto persuasivo detallando el problema técnico. Cierra con: 'Comenta la palabra {palabra_clave} y te envío el acceso directo por DM'.",
-    "hashtags": "#AmazonFBA #Emprendimiento #Negocios #Flete"
-  }},
-  "youtube_seo": {{
-    "title": "Título SEO largo y transaccional (Ej: Cómo evitar recargos Demurrage importando de China)",
-    "description": "Descripción SEO enfocada en B2B. Cierre pidiendo el comentario."
-  }},
-  "pinterest_pins": [
-    {{"text_on_image": "Frase lapidaria B2B para imagen 1 (Ej: El fraude del Incoterm CIF)"}},
-    {{"text_on_image": "Frase lapidaria B2B para imagen 2 (Ej: Contenedor retenido en Valencia)"}},
-    {{"text_on_image": "Frase lapidaria B2B para imagen 3 (Ej: Cómo evitar pagar Demurrage)"}}
-  ],
-  "linkedin_post": "Escribe un post de 3 párrafos contando una 'historia de guerra' real sobre un cliente que perdió miles de euros por un error en el Packing List o el BL. Tono 100% corporativo para CEOs. Cierra invitando a leer la guía comentando {palabra_clave}."
-}}
+    prompt = f"""
+Actúa como un copywriter B2B experto en logística y comercio internacional.
+Vende este producto: '{nombre}'. Problemas que soluciona: '{problemas}'.
+REGLAS: Cero niños, dolor de e-commerce/importadores real, usa jerga (Demurrage, DUA, Incoterms), CTA duro pidiendo comentar '{palabra_clave}'.
+Devuelve estrictamente un JSON con estas claves:
+video_script, tiktok_data (caption, hashtags), ig_reel_data (caption, hashtags), youtube_seo (title, description), pinterest_pins (array de objetos con text_on_image), linkedin_post.
 """
 
-    modelos = elegir_modelos(client)
-    contenido, modelo_usado = generar_contenido(client, prompt_nivel_dios, modelos)
+    contenido = generar_contenido(client, prompt)
+    contenido["_meta"] = {"producto": nombre, "enlace": enlace}
 
-    # Metadatos útiles para el siguiente paso del pipeline (no alteran el resto del JSON)
-    contenido["_meta"] = {
-        "producto": nombre,
-        "palabra_clave": palabra_clave,
-        "enlace_hotmart": enlace,
-        "modelo": modelo_usado,
-    }
+    with open(ARCHIVO_JSON, "w", encoding="utf-8") as f:
+        json.dump(contenido, f, ensure_ascii=False, indent=2)
 
-    guardar_json(contenido, ARCHIVO_SALIDA)
-    log.info("🏁 Proceso completado con éxito.")
+    # FABRICAR EL VÍDEO REAL A PARTIR DEL SCRIPT GENERADO
+    guion_voz = contenido["video_script"]
+    fabricar_video_mp4(guion_voz)
 
+    log.info("🏁 Pipeline completo de texto y vídeo finalizado.")
 
 if __name__ == "__main__":
     try:
         main()
-    except ErrorFatal as e:
-        log.error(f"❌ ERROR FATAL: {e}")
-        sys.exit(1)
-    except KeyboardInterrupt:
-        log.error("🛑 Interrumpido manualmente.")
-        sys.exit(130)
-    except Exception as e:  # red de seguridad final
-        log.exception(f"💥 Error inesperado: {type(e).__name__}: {e}")
+    except Exception as e:
+        log.error(f"❌ ERROR: {e}")
         sys.exit(1)
