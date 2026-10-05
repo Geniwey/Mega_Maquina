@@ -4,14 +4,16 @@ import re
 import sys
 import json
 import time
+import random
 import asyncio
 import logging
 import unicodedata
 import requests
+import numpy as np
 import pandas as pd
 from groq import Groq
 import edge_tts
-from moviepy.editor import VideoFileClip, AudioFileClip, ColorClip
+from moviepy.editor import VideoFileClip, AudioFileClip, VideoClip
 
 # ---------------------------------------------------------------------------
 # CONFIGURACIÓN
@@ -242,37 +244,94 @@ def a_vertical(clip, ancho=1080, alto=1920):
     return clip.crop(x_center=clip.w / 2, y_center=clip.h / 2, width=ancho, height=alto)
 
 
+def descargar_fondo_pexels(ruta: str):
+    """Descarga un vídeo vertical de Pexels. Devuelve la ruta o None si no se puede."""
+    api_key = os.environ.get("PEXELS_API_KEY")
+    if not api_key:
+        log.info("ℹ️ Sin PEXELS_API_KEY: se usará el fondo animado generado.")
+        return None
+
+    consultas = ["cargo ship", "shipping containers port", "logistics warehouse", "container terminal"]
+    random.shuffle(consultas)
+
+    for consulta in consultas:
+        try:
+            log.info(f"🔎 Buscando fondo en Pexels: '{consulta}'...")
+            r = requests.get(
+                "https://api.pexels.com/videos/search",
+                headers={"Authorization": api_key},
+                params={"query": consulta, "orientation": "portrait", "per_page": 15},
+                timeout=30,
+            )
+            r.raise_for_status()
+            videos = r.json().get("videos", [])
+            random.shuffle(videos)
+
+            for v in videos:
+                candidatos = [
+                    f for f in v.get("video_files", [])
+                    if f.get("file_type") == "video/mp4"
+                    and (f.get("height") or 0) >= (f.get("width") or 0)
+                    and (f.get("height") or 0) >= 1080
+                ]
+                if not candidatos:
+                    continue
+                candidatos.sort(key=lambda f: f["height"])  # el más ligero que cumple 1080p
+                enlace = candidatos[0]["link"]
+
+                with requests.get(enlace, stream=True, timeout=60) as resp:
+                    resp.raise_for_status()
+                    with open(ruta, "wb") as f:
+                        for chunk in resp.iter_content(chunk_size=1024 * 256):
+                            if chunk:
+                                f.write(chunk)
+                log.info("✅ Fondo descargado de Pexels.")
+                return ruta
+        except Exception as e:
+            log.warning(f"⚠️ Pexels falló con '{consulta}': {e}")
+    return None
+
+
+def fondo_animado(duracion: float):
+    """Fondo vertical animado generado por código (sin descargas, no se puede bloquear)."""
+    w, h = 270, 480
+    yy, xx = np.mgrid[0:h, 0:w]
+
+    def make_frame(t):
+        v = (np.sin(xx / 60 + t * 0.6) + np.sin(yy / 90 - t * 0.4) + np.sin((xx + yy) / 80 + t * 0.5)) / 3
+        v = (v + 1) / 2
+        r = 15 + 25 * v
+        g = 30 + 60 * v
+        b = 60 + 110 * v
+        return np.dstack([r, g, b]).astype("uint8")
+
+    return VideoClip(make_frame, duration=duracion).resize((1080, 1920))
+
+
 def fabricar_video_mp4(script_texto: str):
     audio_path = "temp_voice.mp3"
+    bg_path = "temp_bg.mp4"
     asyncio.run(generar_voz_audio(script_texto, audio_path))
 
-    log.info("🎬 Descargando fondo y renderizando vídeo MP4 con MoviePy...")
-
-    bg_url = "https://assets.mixkit.co/videos/preview/mixkit-cargo-ship-in-the-sea-41584-large.mp4"
-    bg_path = "temp_bg.mp4"
+    log.info("🎬 Preparando fondo y renderizando vídeo MP4 con MoviePy...")
 
     audio_clip = AudioFileClip(audio_path)
     duracion = audio_clip.duration
 
     video_fondo = None
+    ruta = descargar_fondo_pexels(bg_path)
+    if ruta:
+        try:
+            video_fondo = a_vertical(VideoFileClip(ruta).without_audio())
+            video_fondo = video_fondo.loop(duration=duracion)
+            log.info("✅ Fondo de Pexels adaptado a vertical.")
+        except Exception as e:
+            log.warning(f"⚠️ No se pudo procesar el fondo de Pexels: {e}")
+            video_fondo = None
 
-    try:
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
-        resp = requests.get(bg_url, headers=headers, stream=True, timeout=30)
-        resp.raise_for_status()
-        with open(bg_path, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=1024):
-                if chunk:
-                    f.write(chunk)
-        video_fondo = VideoFileClip(bg_path).without_audio()
-        video_fondo = a_vertical(video_fondo)
-        # Repite el fondo si es más corto que la voz
-        video_fondo = video_fondo.loop(duration=duracion)
-        log.info("✅ Vídeo de fondo descargado y adaptado a vertical.")
-    except Exception as e:
-        log.warning(f"⚠️ Fondo de vídeo falló. Entrando en modo rescate... {e}")
-        video_fondo = ColorClip(size=(1080, 1920), color=(30, 30, 30), duration=duracion)
-        log.info("✅ Fondo de color sólido generado por el modo rescate.")
+    if video_fondo is None:
+        video_fondo = fondo_animado(duracion)
+        log.info("✅ Fondo animado generado por código.")
 
     video_fondo = video_fondo.set_audio(audio_clip)
 
@@ -287,10 +346,9 @@ def fabricar_video_mp4(script_texto: str):
 
     audio_clip.close()
     video_fondo.close()
-    if os.path.exists(audio_path):
-        os.remove(audio_path)
-    if os.path.exists(bg_path):
-        os.remove(bg_path)
+    for p in (audio_path, bg_path):
+        if os.path.exists(p):
+            os.remove(p)
 
     log.info(f"✅ ¡Vídeo fabricado con éxito: {ARCHIVO_VIDEO}!")
 
