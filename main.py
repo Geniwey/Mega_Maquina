@@ -20,7 +20,7 @@ if not hasattr(PIL.Image, 'ANTIALIAS'):
     except AttributeError:
         PIL.Image.ANTIALIAS = PIL.Image.LANCZOS
 
-from moviepy.editor import VideoFileClip, AudioFileClip
+from moviepy.editor import VideoFileClip, AudioFileClip, concatenate_videoclips
 
 # ---------------------------------------------------------------------------
 # CONFIGURACIÓN
@@ -128,7 +128,6 @@ def obtener_mejor_modelo(client: Groq) -> str:
         if not modelos_texto:
             raise ErrorFatal("Groq no devuelve modelos de texto válidos.")
 
-        # 1. Intentamos coger la élite
         preferencias = [
             "llama-3.3-70b-versatile",
             "llama-3.1-70b-versatile",
@@ -139,14 +138,12 @@ def obtener_mejor_modelo(client: Groq) -> str:
                 log.info(f"⭐ Radar fijado en el modelo principal: {pref}")
                 return pref
                 
-        # 2. Si Llama cambia de nombre, pillamos el más potente
         llamas = [m for m in modelos_texto if 'llama' in m.lower()]
         if llamas:
             mejor_llama = sorted(llamas, key=lambda x: "70b" in x.lower(), reverse=True)[0]
             log.info(f"⭐ Usando alternativa Llama detectada: {mejor_llama}")
             return mejor_llama
             
-        # 3. Si no hay Llama, pillamos Qwen (muy potente para español)
         qwens = [m for m in modelos_texto if 'qwen' in m.lower()]
         if qwens:
             log.info(f"⭐ Usando motor Qwen de alta capacidad: {qwens[0]}")
@@ -182,7 +179,7 @@ def generar_contenido(client: Groq, prompt: str, modelo_elegido: str) -> dict:
     raise ErrorFatal("Groq falló tras varios reintentos.")
 
 # ---------------------------------------------------------------------------
-# 3. LA FÁBRICA VISUAL DINÁMICA (ANTI-BLOQUEOS Y SIN CHAPUZAS)
+# 3. LA FÁBRICA VISUAL DINÁMICA (CON BUCLE DE SUPERVIVENCIA)
 # ---------------------------------------------------------------------------
 async def generar_voz_audio(texto: str, archivo_salida: str):
     log.info("🎙️ Sintetizando voz en off B2B (Edge TTS)...")
@@ -196,34 +193,45 @@ def fabricar_video_mp4(script_texto: str):
     
     log.info("🎬 Seleccionando y descargando vídeo de fondo profesional...")
     
-    # Repositorio de vídeos de Wikimedia Commons (Cero 403, libres de derechos, temática puertos/barcos)
+    # Enlaces ORIGINALES (no transcodificados) para evitar que devuelvan error 404
     videos_logistica = [
-        "https://upload.wikimedia.org/wikipedia/commons/transcoded/9/90/Container_ship_leaves_port.webm/Container_ship_leaves_port.webm.720p.vp9.webm",
-        "https://upload.wikimedia.org/wikipedia/commons/transcoded/1/1d/Port_of_Rotterdam.webm/Port_of_Rotterdam.webm.720p.vp9.webm",
-        "https://upload.wikimedia.org/wikipedia/commons/transcoded/8/86/Container_terminal_at_night.webm/Container_terminal_at_night.webm.480p.vp9.webm"
+        "https://upload.wikimedia.org/wikipedia/commons/9/90/Container_ship_leaves_port.webm",
+        "https://upload.wikimedia.org/wikipedia/commons/1/1d/Port_of_Rotterdam.webm",
+        "https://upload.wikimedia.org/wikipedia/commons/8/86/Container_terminal_at_night.webm"
     ]
-    
-    # Elegimos un vídeo al azar para que el contenido de TikTok sea variado cada día
-    bg_url = random.choice(videos_logistica)
+    random.shuffle(videos_logistica) # Orden aleatorio
     bg_path = "temp_bg.webm"
     
     audio_clip = AudioFileClip(audio_path)
     duracion = audio_clip.duration
+    video_fondo = None
     
-    try:
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-        resp = requests.get(bg_url, headers=headers, stream=True, timeout=30)
-        resp.raise_for_status()
-        with open(bg_path, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=1024):
-                if chunk:
-                    f.write(chunk)
+    # BUCLE DE SUPERVIVENCIA: Si un enlace está muerto, prueba el siguiente
+    for url in videos_logistica:
+        try:
+            log.info(f"Intentando descargar desde: {url}")
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+            resp = requests.get(url, headers=headers, stream=True, timeout=40)
+            resp.raise_for_status()
+            with open(bg_path, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=1024):
+                    if chunk:
+                        f.write(chunk)
+            video_fondo = VideoFileClip(bg_path)
+            log.info("✅ Vídeo base descargado y leído con éxito.")
+            break # Si funciona, sale del bucle
+        except Exception as e:
+            log.warning(f"⚠️ Enlace fallido ({type(e).__name__}). Probando el siguiente servidor...")
+            
+    if video_fondo is None:
+        raise ErrorFatal("Todos los enlaces de vídeo fallaron definitivamente.")
         
-        video_fondo = VideoFileClip(bg_path).subclip(0, min(duracion, 60))
-        log.info("✅ Vídeo de logística descargado con éxito desde servidor libre.")
-    except Exception as e:
-        raise ErrorFatal(f"Error descargando el vídeo fuente: {e}")
+    # AUTO-LOOP: Si el vídeo es más corto que la voz, lo repetimos las veces que haga falta
+    if video_fondo.duration < duracion:
+        repeticiones = int(duracion / video_fondo.duration) + 1
+        video_fondo = concatenate_videoclips([video_fondo] * repeticiones)
         
+    video_fondo = video_fondo.subclip(0, duracion)
     video_fondo = video_fondo.set_audio(audio_clip)
     
     log.info("⚙️ Renderizando MP4 final para TikTok/Reels...")
