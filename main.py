@@ -464,4 +464,244 @@ def fabricar_video_mp4(script_texto: str, hook_texto: str, cta_texto: str):
     log.info("🎬 Preparando fondo y capas del vídeo...")
     rutas_bg = descargar_fondos_pexels(NUM_FONDOS)
     fondo = None
+    if rutas_bg:
+        try:
+            fondo = construir_fondo(rutas_bg, duracion)
+            log.info("✅ Fondo de Pexels montado con cambios de plano.")
+        except Exception as e:
+            log.warning(f"⚠️ {e}")
+    if fondo is None:
+        fondo = fondo_animado(duracion)
+        log.info("✅ Fondo animado generado por código.")
 
+    capas = [fondo, ColorClip((1080, 1920), color=(0, 0, 0)).set_opacity(0.35).set_duration(duracion)]
+
+    hook = limpiar_para_imagen(hook_texto).upper()
+    if hook:
+        arr = render_texto_rgba(hook, 960, 78, fondo=(0, 0, 0, 175), pad=34)
+        capas.append(ImageClip(arr).set_start(0).set_duration(min(4.0, duracion)).set_position(("center", 260)))
+
+    if MARCA:
+        arr = render_texto_rgba(limpiar_para_imagen(MARCA), 700, 44, stroke=3, pad=10)
+        capas.append(ImageClip(arr).set_duration(duracion).set_position(("center", 140)))
+
+    for ini, fin, texto in construir_subtitulos(eventos, script_texto, duracion):
+        t = limpiar_para_imagen(texto).upper()
+        if not t:
+            continue
+        arr = render_texto_rgba(t, 980, 96, stroke=8, pad=20)
+        capas.append(ImageClip(arr).set_start(ini).set_duration(fin - ini).set_position(("center", 880)))
+
+    cta = limpiar_para_imagen(cta_texto)
+    if cta:
+        arr = render_texto_rgba(cta.upper(), 960, 66, color=(0, 0, 0, 255), fondo=(255, 196, 0, 240), pad=34)
+        inicio_cta = max(duracion - 4.5, 0)
+        capas.append(ImageClip(arr).set_start(inicio_cta).set_duration(duracion - inicio_cta)
+                     .set_position(("center", 1250)))
+
+    final = CompositeVideoClip(capas, size=(1080, 1920)).set_duration(duracion).set_audio(audio_final)
+
+    log.info("⚙️ Renderizando MP4 final vertical...")
+    final.write_videofile(ARCHIVO_VIDEO, fps=24, codec="libx264", audio_codec="aac",
+                          preset="veryfast", threads=4, ffmpeg_params=["-pix_fmt", "yuv420p"], logger=None)
+
+    for c in (voz, musica, final):
+        try:
+            c.close()
+        except Exception:
+            pass
+    for p in [audio_path, musica_path] + rutas_bg:
+        if os.path.exists(p):
+            os.remove(p)
+    log.info(f"✅ ¡Vídeo fabricado con éxito: {ARCHIVO_VIDEO}!")
+
+
+# ---------------------------------------------------------------------------
+# 8. PINES DE PINTEREST (1000x1500, SIN DESCARGAS)
+# ---------------------------------------------------------------------------
+PALETAS = [((10, 25, 60), (30, 90, 170)), ((15, 15, 25), (130, 40, 50)),
+           ((8, 50, 60), (20, 140, 150)), ((30, 20, 60), (110, 70, 190))]
+
+
+def degradado(w, h, c1, c2):
+    g = np.linspace(0, 1, h).reshape(h, 1, 1)
+    fila = np.array(c1).reshape(1, 1, 3) * (1 - g) + np.array(c2).reshape(1, 1, 3) * g
+    return Image.fromarray(np.repeat(fila, w, axis=1).astype("uint8"), "RGB")
+
+
+def crear_pin(texto: str, etiqueta: str, ruta: str, paleta):
+    W, H = 1000, 1500
+    img = degradado(W, H, *paleta).convert("RGBA")
+    deco = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    dd = ImageDraw.Draw(deco)
+    dd.ellipse([-250, -250, 450, 450], fill=(255, 255, 255, 18))
+    dd.ellipse([600, 1000, 1300, 1700], fill=(255, 255, 255, 18))
+    img = Image.alpha_composite(img, deco)
+    d = ImageDraw.Draw(img)
+
+    etiqueta = limpiar_para_imagen(etiqueta).upper()[:48]
+    fe = cargar_fuente(38)
+    d.text(((W - d.textlength(etiqueta, font=fe)) / 2, 150), etiqueta, font=fe, fill=(255, 196, 0, 255))
+    d.rectangle([W / 2 - 60, 215, W / 2 + 60, 224], fill=(255, 196, 0, 255))
+
+    texto = limpiar_para_imagen(texto).upper()
+    tam = 130
+    while True:
+        fuente = cargar_fuente(tam)
+        lineas = ajustar_lineas(d, texto, fuente, 840)
+        alto_total = len(lineas) * int(tam * 1.2)
+        if alto_total <= 880 or tam <= 56:
+            break
+        tam -= 6
+    y = 270 + (900 - alto_total) / 2
+    for linea in lineas:
+        w = d.textlength(linea, font=fuente)
+        d.text(((W - w) / 2, y), linea, font=fuente, fill=(255, 255, 255, 255),
+               stroke_width=3, stroke_fill=(0, 0, 0, 120))
+        y += int(tam * 1.2)
+
+    fb = cargar_fuente(46)
+    btn = "GUARDA ESTE PIN"
+    wb = d.textlength(btn, font=fb)
+    d.rounded_rectangle([W / 2 - wb / 2 - 50, 1230, W / 2 + wb / 2 + 50, 1320], radius=45, fill=(255, 196, 0, 255))
+    d.text(((W - wb) / 2, 1246), btn, font=fb, fill=(0, 0, 0, 255))
+
+    if MARCA:
+        fm = cargar_fuente(36)
+        m = limpiar_para_imagen(MARCA)
+        d.text(((W - d.textlength(m, font=fm)) / 2, 1400), m, font=fm, fill=(255, 255, 255, 220))
+
+    img.convert("RGB").save(ruta, "JPEG", quality=92)
+
+
+def fabricar_pines(contenido: dict, nombre: str, problemas: str, enlace: str) -> list:
+    os.makedirs(CARPETA_PINES, exist_ok=True)
+    pines = contenido.get("pinterest_pins", [])
+    if isinstance(pines, dict):
+        pines = list(pines.values()) if all(isinstance(v, dict) for v in pines.values()) else [pines]
+    if not isinstance(pines, list):
+        pines = []
+    paletas = PALETAS[:]
+    random.shuffle(paletas)
+    salida = []
+    for i, p in enumerate(pines[:5], start=1):
+        if isinstance(p, str):
+            p = {"text_on_image": p}
+        if not isinstance(p, dict):
+            continue
+        texto = str(p.get("text_on_image") or p.get("texto") or p.get("text") or "").strip()
+        if not texto:
+            continue
+        titulo = str(p.get("title") or p.get("titulo") or texto)[:100]
+        desc = str(p.get("description") or p.get("descripcion") or f"{nombre}. {problemas[:150]}")[:480]
+        archivo = os.path.join(CARPETA_PINES, f"pin_{i}.jpg")
+        crear_pin(texto, nombre, archivo, paletas[(i - 1) % len(paletas)])
+        salida.append({"archivo": archivo, "titulo": titulo, "descripcion": desc, "enlace": enlace})
+        log.info(f"📌 Pin {i} creado: {archivo}")
+    with open(os.path.join(CARPETA_PINES, "pines.json"), "w", encoding="utf-8") as f:
+        json.dump(salida, f, ensure_ascii=False, indent=2)
+    return salida
+
+
+# ---------------------------------------------------------------------------
+# 9. TEXTOS PARA REDES (ARCHIVO LEGIBLE)
+# ---------------------------------------------------------------------------
+def escribir_txt(contenido: dict, enlace: str, pines: list):
+    def g(d, k):
+        return d.get(k, "") if isinstance(d, dict) else str(d)
+
+    def hs(h):
+        return " ".join(h) if isinstance(h, list) else str(h)
+
+    tk, ig, yt = contenido.get("tiktok_data", {}), contenido.get("ig_reel_data", {}), contenido.get("youtube_seo", {})
+    with open(ARCHIVO_TXT, "w", encoding="utf-8") as f:
+        f.write("=== TIKTOK ===\n")
+        f.write(f"{g(tk, 'caption')}\n{hs(g(tk, 'hashtags'))}\n\n")
+        f.write("=== INSTAGRAM REEL ===\n")
+        f.write(f"{g(ig, 'caption')}\n{hs(g(ig, 'hashtags'))}\n\n")
+        f.write("=== YOUTUBE SHORTS ===\n")
+        f.write(f"Título: {g(yt, 'title')}\nDescripción: {g(yt, 'description')}\n\n")
+        f.write("=== LINKEDIN ===\n")
+        f.write(f"{texto_plano(contenido.get('linkedin_post', ''))}\n\n")
+        f.write("=== PINTEREST ===\n")
+        for p in pines:
+            f.write(f"[{p['archivo']}]\nTítulo: {p['titulo']}\nDescripción: {p['descripcion']}\nEnlace: {p['enlace']}\n\n")
+        f.write(f"=== ENLACE DEL PRODUCTO ===\n{enlace}\n")
+
+
+# ---------------------------------------------------------------------------
+# MAIN
+# ---------------------------------------------------------------------------
+def main():
+    log.info("🚀 Arrancando la Mega Máquina de Contenido...")
+    api_key = os.environ.get("GROQ_API_KEY")
+    if not api_key:
+        raise ErrorFatal("Falta GROQ_API_KEY en los Secrets.")
+
+    df = validar_dataframe(descargar_csv(CSV_URL))
+    prod = df.sample(n=1).iloc[0]
+    nombre, problemas = prod["NOMBRE_PRODUCTO"], prod["PROBLEMAS_QUE_RESUELVE"]
+    palabra_clave, enlace = prod["PALABRA_CLAVE_MANYCHAT"], prod["ENLACE_HOTMART"]
+    log.info(f"🎯 Producto seleccionado hoy: {nombre}")
+
+    client = Groq(api_key=api_key, timeout=TIMEOUT_GROQ_SEG, max_retries=0)
+    modelos = obtener_modelos_candidatos(client)
+
+    prompt = f"""
+Actúa como un copywriter B2B experto en logística y comercio internacional.
+Vende este producto: '{nombre}'. Problemas que soluciona: '{problemas}'.
+REGLAS: Cero niños, dolor de e-commerce/importadores real, usa jerga (Demurrage, DUA, Incoterms), CTA duro pidiendo comentar '{palabra_clave}'.
+
+El video_script debe ser UN SOLO TEXTO continuo (sin corchetes, sin indicaciones de escena, sin emojis) de 60 a 80 palabras con esta estructura:
+1) Gancho que frene el scroll con un dolor concreto (primeras 10 palabras).
+2) Problema agravado con una consecuencia real o cifra.
+3) Solución: el producto con 2 beneficios concretos.
+4) CTA final pidiendo comentar '{palabra_clave}'.
+
+Devuelve estrictamente un JSON con estas claves:
+- video_script (texto, según lo indicado)
+- hook_text (máximo 8 palabras, frase de impacto para mostrar en pantalla)
+- cta_text (máximo 8 palabras, ej: Comenta {palabra_clave} y te lo envío)
+- tiktok_data (objeto con caption y hashtags)
+- ig_reel_data (objeto con caption y hashtags)
+- youtube_seo (objeto con title y description)
+- pinterest_pins (array de 3 objetos, cada uno con: text_on_image de máximo 8 palabras, title de máximo 100 caracteres, description de 150 a 300 caracteres con CTA)
+- linkedin_post (texto de 800-1200 caracteres, primera línea con gancho, párrafos cortos, CTA al final)
+"""
+
+    contenido, modelo_usado = generar_contenido(client, prompt, modelos)
+    contenido["_meta"] = {"producto": nombre, "enlace": enlace, "modelo_usado": modelo_usado}
+
+    with open(ARCHIVO_JSON, "w", encoding="utf-8") as f:
+        json.dump(contenido, f, ensure_ascii=False, indent=2)
+
+    guion_voz = limpiar_guion_para_voz(texto_plano(contenido.get("video_script", "")))
+    if not guion_voz:
+        guion_voz = f"Evita problemas de aduanas y sobrecostes. Comenta {palabra_clave} y te ayudo con la {nombre}."
+
+    hook = texto_plano(contenido.get("hook_text", ""))
+    if not hook:
+        hook = " ".join(re.split(r"(?<=[.!?])\s", guion_voz)[0].split()[:9])
+    cta = texto_plano(contenido.get("cta_text", "")) or f"Comenta {palabra_clave} y te lo envío"
+
+    pines = []
+    try:
+        pines = fabricar_pines(contenido, nombre, problemas, enlace)
+    except Exception as e:
+        log.warning(f"⚠️ No se pudieron crear los pines: {e}")
+
+    try:
+        escribir_txt(contenido, enlace, pines)
+    except Exception as e:
+        log.warning(f"⚠️ No se pudo crear el TXT: {e}")
+
+    fabricar_video_mp4(guion_voz, hook, cta)
+    log.info("🏁 Pipeline completo y profesional finalizado.")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        log.error(f"❌ ERROR FATAL: {e}")
+        sys.exit(1)
