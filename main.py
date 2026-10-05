@@ -3,9 +3,9 @@ import io
 import sys
 import json
 import time
-import random
 import asyncio
 import logging
+import subprocess
 import unicodedata
 import requests
 import pandas as pd
@@ -20,7 +20,7 @@ if not hasattr(PIL.Image, 'ANTIALIAS'):
     except AttributeError:
         PIL.Image.ANTIALIAS = PIL.Image.LANCZOS
 
-from moviepy.editor import VideoFileClip, AudioFileClip, concatenate_videoclips
+from moviepy.editor import VideoFileClip, AudioFileClip, ImageClip, concatenate_videoclips
 
 # ---------------------------------------------------------------------------
 # CONFIGURACIÓN
@@ -179,7 +179,7 @@ def generar_contenido(client: Groq, prompt: str, modelo_elegido: str) -> dict:
     raise ErrorFatal("Groq falló tras varios reintentos.")
 
 # ---------------------------------------------------------------------------
-# 3. LA FÁBRICA VISUAL DINÁMICA (CON BUCLE DE SUPERVIVENCIA)
+# 3. LA FÁBRICA VISUAL (100% BLINDADA)
 # ---------------------------------------------------------------------------
 async def generar_voz_audio(texto: str, archivo_salida: str):
     log.info("🎙️ Sintetizando voz en off B2B (Edge TTS)...")
@@ -189,113 +189,4 @@ async def generar_voz_audio(texto: str, archivo_salida: str):
 
 def fabricar_video_mp4(script_texto: str):
     audio_path = "temp_voice.mp3"
-    asyncio.run(generar_voz_audio(script_texto, audio_path))
-    
-    log.info("🎬 Seleccionando y descargando vídeo de fondo profesional...")
-    
-    # Enlaces ORIGINALES (no transcodificados) para evitar que devuelvan error 404
-    videos_logistica = [
-        "https://upload.wikimedia.org/wikipedia/commons/9/90/Container_ship_leaves_port.webm",
-        "https://upload.wikimedia.org/wikipedia/commons/1/1d/Port_of_Rotterdam.webm",
-        "https://upload.wikimedia.org/wikipedia/commons/8/86/Container_terminal_at_night.webm"
-    ]
-    random.shuffle(videos_logistica) # Orden aleatorio
-    bg_path = "temp_bg.webm"
-    
-    audio_clip = AudioFileClip(audio_path)
-    duracion = audio_clip.duration
-    video_fondo = None
-    
-    # BUCLE DE SUPERVIVENCIA: Si un enlace está muerto, prueba el siguiente
-    for url in videos_logistica:
-        try:
-            log.info(f"Intentando descargar desde: {url}")
-            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-            resp = requests.get(url, headers=headers, stream=True, timeout=40)
-            resp.raise_for_status()
-            with open(bg_path, "wb") as f:
-                for chunk in resp.iter_content(chunk_size=1024):
-                    if chunk:
-                        f.write(chunk)
-            video_fondo = VideoFileClip(bg_path)
-            log.info("✅ Vídeo base descargado y leído con éxito.")
-            break # Si funciona, sale del bucle
-        except Exception as e:
-            log.warning(f"⚠️ Enlace fallido ({type(e).__name__}). Probando el siguiente servidor...")
-            
-    if video_fondo is None:
-        raise ErrorFatal("Todos los enlaces de vídeo fallaron definitivamente.")
-        
-    # AUTO-LOOP: Si el vídeo es más corto que la voz, lo repetimos las veces que haga falta
-    if video_fondo.duration < duracion:
-        repeticiones = int(duracion / video_fondo.duration) + 1
-        video_fondo = concatenate_videoclips([video_fondo] * repeticiones)
-        
-    video_fondo = video_fondo.subclip(0, duracion)
-    video_fondo = video_fondo.set_audio(audio_clip)
-    
-    log.info("⚙️ Renderizando MP4 final para TikTok/Reels...")
-    video_fondo.write_videofile(
-        ARCHIVO_VIDEO,
-        fps=24,
-        codec="libx264",
-        audio_codec="aac",
-        preset="ultrafast",
-        logger=None
-    )
-    
-    audio_clip.close()
-    video_fondo.close()
-    if os.path.exists(audio_path): os.remove(audio_path)
-    if os.path.exists(bg_path): os.remove(bg_path)
-    
-    log.info(f"✅ ¡Vídeo profesional fabricado con éxito: {ARCHIVO_VIDEO}!")
-
-# ---------------------------------------------------------------------------
-# MAIN
-# ---------------------------------------------------------------------------
-def main():
-    log.info("🚀 Arrancando la Mega Máquina de Contenido...")
-    api_key = os.environ.get("GROQ_API_KEY")
-    if not api_key:
-        raise ErrorFatal("Falta GROQ_API_KEY en los Secrets.")
-
-    df = validar_dataframe(descargar_csv(CSV_URL))
-    prod = df.sample(n=1).iloc[0]
-    
-    nombre = prod["NOMBRE_PRODUCTO"]
-    problemas = prod["PROBLEMAS_QUE_RESUELVE"]
-    palabra_clave = prod["PALABRA_CLAVE_MANYCHAT"]
-    enlace = prod["ENLACE_HOTMART"]
-
-    log.info(f"🎯 Producto seleccionado hoy: {nombre}")
-
-    client = Groq(api_key=api_key, timeout=TIMEOUT_GROQ_SEG, max_retries=0)
-    
-    mejor_modelo = obtener_mejor_modelo(client)
-
-    prompt = f"""
-Actúa como un copywriter B2B experto en logística y comercio internacional.
-Vende este producto: '{nombre}'. Problemas que soluciona: '{problemas}'.
-REGLAS: Cero niños, dolor de e-commerce/importadores real, usa jerga (Demurrage, DUA, Incoterms), CTA duro pidiendo comentar '{palabra_clave}'.
-Devuelve estrictamente un JSON con estas claves:
-video_script, tiktok_data (caption, hashtags), ig_reel_data (caption, hashtags), youtube_seo (title, description), pinterest_pins (array de objetos con text_on_image), linkedin_post.
-"""
-
-    contenido = generar_contenido(client, prompt, mejor_modelo)
-    contenido["_meta"] = {"producto": nombre, "enlace": enlace, "modelo_usado": mejor_modelo}
-
-    with open(ARCHIVO_JSON, "w", encoding="utf-8") as f:
-        json.dump(contenido, f, ensure_ascii=False, indent=2)
-
-    guion_voz = contenido["video_script"]
-    fabricar_video_mp4(guion_voz)
-
-    log.info("🏁 Pipeline completo y profesional finalizado.")
-
-if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        log.error(f"❌ ERROR FATAL: {e}")
-        sys.exit(1)
+    asyncio.run(generar_voz_audio(script_
