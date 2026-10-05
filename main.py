@@ -189,4 +189,117 @@ async def generar_voz_audio(texto: str, archivo_salida: str):
 
 def fabricar_video_mp4(script_texto: str):
     audio_path = "temp_voice.mp3"
-    asyncio.run(generar_voz_audio(script_
+    asyncio.run(generar_voz_audio(script_texto, audio_path))
+    
+    bg_path = "temp_bg.mp4"
+    video_fondo = None
+    
+    try:
+        log.info("🎬 Instalando motor de extracción de vídeo profesional...")
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "yt-dlp", "--quiet"])
+        import yt_dlp
+        
+        log.info("🎬 Descargando fondo dinámico de logística (Stock Footage)...")
+        ydl_opts = {
+            'format': 'bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+            'outtmpl': bg_path,
+            'quiet': True,
+            'no_warnings': True
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.extract_info("ytsearch1:cargo ship container port drone aerial HD stock footage no text short", download=True)
+            
+        video_fondo = VideoFileClip(bg_path)
+        log.info("✅ Vídeo dinámico de alta calidad descargado con éxito.")
+        
+    except Exception as e:
+        log.warning(f"⚠️ El extractor de vídeo falló ({e}). Activando Plan B corporativo...")
+        img_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/b/b2/Port_of_Rotterdam_-_Maasvlakte_-_ECT_2.jpg/1280px-Port_of_Rotterdam_-_Maasvlakte_-_ECT_2.jpg"
+        img_path = "temp_bg.jpg"
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        r = requests.get(img_url, headers=headers, stream=True, timeout=15)
+        with open(img_path, "wb") as f:
+            for chunk in r.iter_content(1024):
+                f.write(chunk)
+        video_fondo = ImageClip(img_path)
+        log.info("✅ Fotografía del Puerto de Rotterdam cargada correctamente.")
+
+    audio_clip = AudioFileClip(audio_path)
+    duracion = audio_clip.duration
+    
+    if hasattr(video_fondo, 'duration') and video_fondo.duration and video_fondo.duration > 0:
+        if video_fondo.duration < duracion:
+            repeticiones = int(duracion / video_fondo.duration) + 1
+            video_fondo = concatenate_videoclips([video_fondo] * repeticiones)
+        video_fondo = video_fondo.subclip(0, duracion)
+    else:
+        video_fondo = video_fondo.set_duration(duracion)
+
+    video_fondo = video_fondo.set_audio(audio_clip)
+    
+    log.info("⚙️ Renderizando MP4 final para TikTok/Reels...")
+    video_fondo.write_videofile(
+        ARCHIVO_VIDEO,
+        fps=24,
+        codec="libx264",
+        audio_codec="aac",
+        preset="ultrafast",
+        logger=None
+    )
+    
+    audio_clip.close()
+    video_fondo.close()
+    if os.path.exists(audio_path): os.remove(audio_path)
+    if os.path.exists(bg_path): os.remove(bg_path)
+    if os.path.exists("temp_bg.jpg"): os.remove("temp_bg.jpg")
+    
+    log.info(f"✅ ¡Vídeo profesional fabricado con éxito: {ARCHIVO_VIDEO}!")
+
+# ---------------------------------------------------------------------------
+# MAIN
+# ---------------------------------------------------------------------------
+def main():
+    log.info("🚀 Arrancando la Mega Máquina de Contenido...")
+    api_key = os.environ.get("GROQ_API_KEY")
+    if not api_key:
+        raise ErrorFatal("Falta GROQ_API_KEY en los Secrets.")
+
+    df = validar_dataframe(descargar_csv(CSV_URL))
+    prod = df.sample(n=1).iloc[0]
+    
+    nombre = prod["NOMBRE_PRODUCTO"]
+    problemas = prod["PROBLEMAS_QUE_RESUELVE"]
+    palabra_clave = prod["PALABRA_CLAVE_MANYCHAT"]
+    enlace = prod["ENLACE_HOTMART"]
+
+    log.info(f"🎯 Producto seleccionado hoy: {nombre}")
+
+    client = Groq(api_key=api_key, timeout=TIMEOUT_GROQ_SEG, max_retries=0)
+    
+    mejor_modelo = obtener_mejor_modelo(client)
+
+    prompt = f"""
+Actúa como un copywriter B2B experto en logística y comercio internacional.
+Vende este producto: '{nombre}'. Problemas que soluciona: '{problemas}'.
+REGLAS: Cero niños, dolor de e-commerce/importadores real, usa jerga (Demurrage, DUA, Incoterms), CTA duro pidiendo comentar '{palabra_clave}'.
+Devuelve estrictamente un JSON con estas claves:
+video_script, tiktok_data (caption, hashtags), ig_reel_data (caption, hashtags), youtube_seo (title, description), pinterest_pins (array de objetos con text_on_image), linkedin_post.
+"""
+
+    contenido = generar_contenido(client, prompt, mejor_modelo)
+    contenido["_meta"] = {"producto": nombre, "enlace": enlace, "modelo_usado": mejor_modelo}
+
+    with open(ARCHIVO_JSON, "w", encoding="utf-8") as f:
+        json.dump(contenido, f, ensure_ascii=False, indent=2)
+
+    guion_voz = contenido["video_script"]
+    fabricar_video_mp4(guion_voz)
+
+    log.info("🏁 Pipeline completo y profesional finalizado.")
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        log.error(f"❌ ERROR FATAL: {e}")
+        sys.exit(1)
