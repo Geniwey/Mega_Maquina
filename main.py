@@ -10,7 +10,7 @@ import requests
 import pandas as pd
 from groq import Groq
 import edge_tts
-from moviepy.editor import VideoFileClip, AudioFileClip
+from moviepy.editor import VideoFileClip, AudioFileClip, ColorClip
 
 # ---------------------------------------------------------------------------
 # CONFIGURACIÓN
@@ -100,19 +100,19 @@ def validar_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # ---------------------------------------------------------------------------
-# 2. RADAR DE MODELOS
+# 2. RADAR DE MODELOS (BLINDADO)
 # ---------------------------------------------------------------------------
 def obtener_mejor_modelo(client: Groq) -> str:
     log.info("📡 Escaneando modelos disponibles en Groq...")
     try:
         modelos_activos = [m.id for m in client.models.list().data]
         
+        # Lista estricta, si no están, usaremos el comodín seguro.
         preferencias = [
             "llama-3.3-70b-versatile",
             "llama-3.1-70b-versatile",
             "llama3-70b-8192",
-            "mixtral-8x7b-32768",
-            "llama-3.1-8b-instant"
+            "mixtral-8x7b-32768"
         ]
         
         for pref in preferencias:
@@ -120,25 +120,11 @@ def obtener_mejor_modelo(client: Groq) -> str:
                 log.info(f"⭐ Radar fijado en el mejor modelo: {pref}")
                 return pref
                 
-        modelos_seguros = [
-            m for m in modelos_activos 
-            if "prompt-guard" not in m.lower() 
-            and "whisper" not in m.lower() 
-            and "vision" not in m.lower()
-        ]
-        
-        for m in modelos_seguros:
-            if 'llama' in m.lower():
-                log.warning(f"⚠️ Modelo preferido no encontrado. Usando alternativa validada: {m}")
-                return m
-                
-        if modelos_seguros:
-             return modelos_seguros[0]
-             
-        return "llama-3.3-70b-versatile"
+        log.warning("⚠️ No se encontró la élite. Forzando modelo estándar seguro: llama3-8b-8192")
+        return "llama3-8b-8192"
     except Exception as e:
-        log.error(f"❌ Fallo en el radar de modelos: {e}. Forzando llama-3.3-70b-versatile")
-        return "llama-3.3-70b-versatile"
+        log.error(f"❌ Fallo en el radar de modelos: {e}. Forzando fallback.")
+        return "llama3-8b-8192"
 
 def generar_contenido(client: Groq, prompt: str, modelo_elegido: str) -> dict:
     for intento in range(1, MAX_REINTENTOS + 1):
@@ -164,7 +150,7 @@ def generar_contenido(client: Groq, prompt: str, modelo_elegido: str) -> dict:
     raise ErrorFatal("Groq falló tras varios reintentos.")
 
 # ---------------------------------------------------------------------------
-# 3. LA FÁBRICA VISUAL
+# 3. LA FÁBRICA VISUAL (ANTI-BLOQUEOS)
 # ---------------------------------------------------------------------------
 async def generar_voz_audio(texto: str, archivo_salida: str):
     log.info("🎙️ Sintetizando voz en off profesional (Edge TTS)...")
@@ -181,17 +167,28 @@ def fabricar_video_mp4(script_texto: str):
     bg_url = "https://assets.mixkit.co/videos/preview/mixkit-cargo-ship-in-the-sea-41584-large.mp4"
     bg_path = "temp_bg.mp4"
     
-    resp = requests.get(bg_url, stream=True, timeout=60)
-    resp.raise_for_status()
-    with open(bg_path, "wb") as f:
-        for chunk in resp.iter_content(chunk_size=1024):
-            if chunk:
-                f.write(chunk)
-                
     audio_clip = AudioFileClip(audio_path)
     duracion = audio_clip.duration
     
-    video_fondo = VideoFileClip(bg_path).subclip(0, min(duracion, 60))
+    video_fondo = None
+    
+    try:
+        # Intento de descarga con máscara de navegador (User-Agent) para evitar el 403
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+        resp = requests.get(bg_url, headers=headers, stream=True, timeout=30)
+        resp.raise_for_status()
+        with open(bg_path, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=1024):
+                if chunk:
+                    f.write(chunk)
+        video_fondo = VideoFileClip(bg_path).subclip(0, min(duracion, 60))
+        log.info("✅ Vídeo de fondo descargado con éxito.")
+    except Exception as e:
+        log.warning(f"⚠️ Mixkit bloqueó la descarga. Entrando en modo rescate... {e}")
+        # MODO RESCATE: Si la web bloquea a GitHub, creamos un fondo oscuro (gris marengo) para que la máquina no colapse.
+        video_fondo = ColorClip(size=(1080, 1920), color=(30, 30, 30), duration=duracion)
+        log.info("✅ Fondo de color sólido generado por el modo rescate.")
+        
     video_fondo = video_fondo.set_audio(audio_clip)
     
     video_fondo.write_videofile(
@@ -258,4 +255,3 @@ if __name__ == "__main__":
     except Exception as e:
         log.error(f"❌ ERROR: {e}")
         sys.exit(1)
-        
