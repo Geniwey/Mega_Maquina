@@ -100,31 +100,53 @@ def validar_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # ---------------------------------------------------------------------------
-# 2. RADAR DE MODELOS (BLINDADO)
+# 2. RADAR DE MODELOS (LECTURA EN VIVO, CERO CÓDIGO MUERTO)
 # ---------------------------------------------------------------------------
 def obtener_mejor_modelo(client: Groq) -> str:
-    log.info("📡 Escaneando modelos disponibles en Groq...")
+    log.info("📡 Escaneando modelos disponibles HOY en Groq...")
     try:
+        # 1. Lee la lista viva de la API de Groq
         modelos_activos = [m.id for m in client.models.list().data]
+        log.info(f"Modelos detectados online: {modelos_activos}")
         
-        # Lista estricta, si no están, usaremos el comodín seguro.
+        # 2. Filtra basuras (audio, vision, guardianes)
+        modelos_texto = [
+            m for m in modelos_activos 
+            if "whisper" not in m.lower() 
+            and "guard" not in m.lower() 
+            and "vision" not in m.lower()
+            and "llava" not in m.lower()
+        ]
+        
+        if not modelos_texto:
+            raise ErrorFatal("Groq no devuelve modelos de texto válidos.")
+
+        # 3. Orden de preferencia actual
         preferencias = [
             "llama-3.3-70b-versatile",
             "llama-3.1-70b-versatile",
-            "llama3-70b-8192",
-            "mixtral-8x7b-32768"
+            "llama-3.1-8b-instant",
+            "mixtral-8x7b-32768",
+            "gemma2-9b-it"
         ]
         
         for pref in preferencias:
-            if pref in modelos_activos:
-                log.info(f"⭐ Radar fijado en el mejor modelo: {pref}")
+            if pref in modelos_texto:
+                log.info(f"⭐ Radar fijado en el modelo élite: {pref}")
                 return pref
                 
-        log.warning("⚠️ No se encontró la élite. Forzando modelo estándar seguro: llama3-8b-8192")
-        return "llama3-8b-8192"
+        # 4. Si cambian los nombres, coge el primer LLAMA activo
+        for m in modelos_texto:
+            if 'llama' in m.lower():
+                log.warning(f"⚠️ Usando alternativa Llama detectada en vivo: {m}")
+                return m
+                
+        # 5. Fallback final: El primero de la lista viva (NUNCA uno inventado)
+        log.warning(f"⚠️ Usando modelo de rescate absoluto: {modelos_texto[0]}")
+        return modelos_texto[0]
+        
     except Exception as e:
-        log.error(f"❌ Fallo en el radar de modelos: {e}. Forzando fallback.")
-        return "llama3-8b-8192"
+        raise ErrorFatal(f"Fallo en el radar de modelos: {e}")
 
 def generar_contenido(client: Groq, prompt: str, modelo_elegido: str) -> dict:
     for intento in range(1, MAX_REINTENTOS + 1):
@@ -173,8 +195,7 @@ def fabricar_video_mp4(script_texto: str):
     video_fondo = None
     
     try:
-        # Intento de descarga con máscara de navegador (User-Agent) para evitar el 403
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
         resp = requests.get(bg_url, headers=headers, stream=True, timeout=30)
         resp.raise_for_status()
         with open(bg_path, "wb") as f:
@@ -185,7 +206,6 @@ def fabricar_video_mp4(script_texto: str):
         log.info("✅ Vídeo de fondo descargado con éxito.")
     except Exception as e:
         log.warning(f"⚠️ Mixkit bloqueó la descarga. Entrando en modo rescate... {e}")
-        # MODO RESCATE: Si la web bloquea a GitHub, creamos un fondo oscuro (gris marengo) para que la máquina no colapse.
         video_fondo = ColorClip(size=(1080, 1920), color=(30, 30, 30), duration=duracion)
         log.info("✅ Fondo de color sólido generado por el modo rescate.")
         
