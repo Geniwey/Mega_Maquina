@@ -18,8 +18,10 @@ jobs:
 
       - name: 📦 Instalar herramientas multimedia y librerías
         run: |
-          sudo apt-get update && sudo apt-get install -y ffmpeg
-          pip install pandas groq requests edge-tts moviepy==1.0.3 pillow
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg imagemagick fonts-dejavu
+          sudo sed -i 's/none/read,write/g' /etc/ImageMagick-6/policy.xml
+          pip install pandas groq requests edge-tts moviepy==1.0.3 pillow yt-dlp
 
       - name: 🚀 Ejecutar la Fábrica de Contenido
         env:
@@ -32,5 +34,5 @@ jobs:
         with:
           name: Paquete_Contenido_Hoy
           path: |
-            contenido_hoy.json
+            TEXTOS_PARA_REDES.txt
             video_final.mp4
