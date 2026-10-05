@@ -32,6 +32,14 @@ SHEET_ID = "10gJJCIlPzCHYEfPYPKgT3-xjUtghbIaYpdR87Da4JPQ"
 CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv"
 COLUMNAS_REQUERIDAS = ["NOMBRE_PRODUCTO", "PROBLEMAS_QUE_RESUELVE", "PALABRA_CLAVE_MANYCHAT", "ENLACE_HOTMART"]
 
+CARPETA_PINES = "pines"
+
+CLAVES_JSON_ESPERADAS = [
+    "video_script", "hook_text", "tiktok_caption", "ig_reel_caption", 
+    "ig_post_image_text", "youtube_seo", "pinterest_pins", 
+    "linkedin_story", "linkedin_pdf_slides"
+]
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-8s | %(message)s", stream=sys.stdout)
 log = logging.getLogger("agencia_360")
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -55,11 +63,13 @@ def descargar_csv(url: str) -> pd.DataFrame:
             df = df[COLUMNAS_REQUERIDAS].dropna().copy()
             for col in COLUMNAS_REQUERIDAS: df[col] = df[col].map(limpiar_texto)
             return df[(df[COLUMNAS_REQUERIDAS] != "").all(axis=1)]
-        except Exception: time.sleep(5)
+        except Exception as e: 
+            log.warning(f"⚠️ Error leyendo CSV: {e}")
+            time.sleep(5)
     raise ErrorFatal("Fallo crítico leyendo CSV.")
 
 # ---------------------------------------------------------------------------
-# 2. IA: RADAR Y GENERACIÓN
+# 2. IA: RADAR Y GENERACIÓN BLINDADA
 # ---------------------------------------------------------------------------
 def extraer_json(texto: str) -> dict:
     t = re.sub(r"<think>.*?</think>", "", texto, flags=re.DOTALL).strip()
@@ -67,22 +77,50 @@ def extraer_json(texto: str) -> dict:
     try: return json.loads(t)
     except json.JSONDecodeError:
         ini, fin = t.find("{"), t.rfind("}")
-        if ini == -1 or fin == -1: raise ValueError("Sin JSON.")
+        if ini == -1 or fin == -1: raise ValueError("La respuesta no contiene JSON válido.")
         return json.loads(t[ini:fin + 1])
 
 def generar_contenido(client: Groq, prompt: str):
     modelos = ["llama-3.3-70b-versatile", "llama-3.1-70b-versatile", "mixtral-8x7b-32768", "llama3-8b-8192"]
     for modelo in modelos:
-        for intento in range(3):
+        modo_minimo = False
+        for intento in range(1, 4):
             try:
-                log.info(f"🧠 Prompting {modelo}...")
-                resp = client.chat.completions.create(
-                    messages=[{"role": "user", "content": prompt}],
-                    model=modelo, temperature=0.7, response_format={"type": "json_object"}
+                log.info(f"🧠 Prompting {modelo} (Intento {intento}, Modo {'mínimo' if modo_minimo else 'normal'})...")
+                kwargs = dict(
+                    messages=[
+                        {"role": "system", "content": "Responde SOLO con un objeto JSON válido, sin texto extra."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    model=modelo, temperature=0.7
                 )
-                return extraer_json(resp.choices[0].message.content or "")
-            except Exception: time.sleep(5)
-    raise ErrorFatal("Colapso de la IA.")
+                if not modo_minimo:
+                    kwargs["response_format"] = {"type": "json_object"}
+                    kwargs["max_completion_tokens"] = 6000
+                
+                resp = client.chat.completions.create(**kwargs)
+                datos = extraer_json(resp.choices[0].message.content or "")
+                
+                for k in CLAVES_JSON_ESPERADAS:
+                    if k not in datos: raise ValueError(f"Falta clave JSON: {k}")
+                
+                log.info(f"✅ JSON 360 validado correctamente con {modelo}.")
+                return datos
+                
+            except Exception as e:
+                msg = str(e).lower()
+                log.warning(f"⚠️ Error {modelo}: {e}")
+                
+                if ("400" in msg or "json" in msg or "format" in msg) and not modo_minimo:
+                    log.warning("↩️ Reintentando sin formato JSON estricto...")
+                    modo_minimo = True
+                    continue
+                if "429" in msg or "rate" in msg:
+                    time.sleep(15)
+                    continue
+                time.sleep(5)
+        log.warning(f"⏭️ Pasando al siguiente modelo tras fallar {modelo}.")
+    raise ErrorFatal("Colapso total de la IA. Ningún modelo funcionó.")
 
 # ---------------------------------------------------------------------------
 # 3. PEXELS Y DIBUJO (PILLOW)
@@ -92,7 +130,7 @@ def obtener_fondos_pexels(orientacion="portrait", num=3) -> list:
     if not api_key: return []
     rutas = []
     try:
-        q = random.choice(["cargo ship", "logistics warehouse", "shipping containers"])
+        q = random.choice(["cargo ship", "logistics warehouse", "shipping containers", "freight logistics"])
         r = requests.get(f"https://api.pexels.com/videos/search?query={q}&orientation={orientacion}&per_page=15",
                          headers={"Authorization": api_key}, timeout=30)
         videos = r.json().get("videos", [])
@@ -104,7 +142,7 @@ def obtener_fondos_pexels(orientacion="portrait", num=3) -> list:
                 with open(ruta, "wb") as f:
                     for chunk in resp.iter_content(1024*256): f.write(chunk)
             rutas.append(ruta)
-    except Exception as e: log.warning(f"⚠️ Fallo Pexels: {e}")
+    except Exception as e: log.warning(f"⚠️ Fallo Pexels Video: {e}")
     return rutas
 
 def descargar_foto_pexels(orientacion="portrait") -> str:
@@ -124,7 +162,7 @@ def cargar_fuente(tam: int):
 
 def dibujar_texto_centrado(draw, texto, w, y, fuente, color=(255,255,255), stroke=0):
     lineas, actual = [], ""
-    for p in texto.split():
+    for p in str(texto).split():
         if draw.textlength(actual + " " + p, font=fuente) < w - 100: actual += " " + p
         else: lineas.append(actual.strip()); actual = p
     lineas.append(actual.strip())
@@ -140,8 +178,16 @@ def dibujar_texto_centrado(draw, texto, w, y, fuente, color=(255,255,255), strok
 # ---------------------------------------------------------------------------
 def generar_pines(contenido: dict):
     os.makedirs(CARPETA_PINES, exist_ok=True)
-    pines = contenido.get("pinterest_pins", [])[:3]
-    for i, p in enumerate(pines):
+    pines = contenido.get("pinterest_pins", [])
+    
+    # Blindaje contra diccionarios accidentales
+    if isinstance(pines, dict):
+        pines = list(pines.values()) if all(isinstance(v, dict) for v in pines.values()) else [pines]
+    if not isinstance(pines, list):
+        pines = []
+        
+    for i, p in enumerate(pines[:3]):
+        if isinstance(p, str): p = {"title": p}
         url = descargar_foto_pexels("portrait")
         if url:
             img = Image.open(requests.get(url, stream=True).raw).convert("RGB").resize((1080, 1920), Image.ANTIALIAS)
@@ -151,26 +197,32 @@ def generar_pines(contenido: dict):
         img = ImageEnhance.Brightness(img).enhance(0.4)
         draw = ImageDraw.Draw(img)
         
-        y = dibujar_texto_centrado(draw, p.get("title", "IMPORTACIÓN").upper(), 1080, 600, cargar_fuente(90), stroke=4)
+        titulo = str(p.get("title", p.get("text_on_image", "IMPORTACIÓN"))).upper()
+        y = dibujar_texto_centrado(draw, titulo, 1080, 600, cargar_fuente(90), stroke=4)
         draw.rectangle([440, y+40, 640, y+50], fill=(255, 196, 0))
         img.save(os.path.join(CARPETA_PINES, f"pin_{i+1}.jpg"), quality=90)
+        log.info(f"📌 Pin {i+1} generado.")
 
 def generar_post_ig(contenido: dict):
     url = descargar_foto_pexels("square")
     img = Image.open(requests.get(url, stream=True).raw).convert("RGB").resize((1080, 1080), Image.ANTIALIAS) if url else Image.new("RGB", (1080, 1080), (15, 23, 42))
     img = ImageEnhance.Brightness(img).enhance(0.3)
     draw = ImageDraw.Draw(img)
-    dibujar_texto_centrado(draw, contenido.get("ig_post_image_text", "TIP LOGÍSTICO").upper(), 1080, 300, cargar_fuente(85), stroke=3)
+    texto_ig = str(contenido.get("ig_post_image_text", "TIP LOGÍSTICO")).upper()
+    dibujar_texto_centrado(draw, texto_ig, 1080, 300, cargar_fuente(85), stroke=3)
     img.save("ig_post_estatico.jpg", quality=95)
+    log.info("📷 Post estático IG generado.")
 
 def generar_pdf_linkedin(contenido: dict):
-    diapositivas = contenido.get("linkedin_pdf_slides", ["Slide 1", "Slide 2", "Slide 3"])[:3]
+    diapositivas = contenido.get("linkedin_pdf_slides", ["Slide 1", "Slide 2", "Slide 3"])
+    if not isinstance(diapositivas, list): diapositivas = ["Slide 1", "Slide 2"]
+    
     imagenes = []
-    for i, texto in enumerate(diapositivas):
+    for i, texto in enumerate(diapositivas[:3]):
         img = Image.new("RGB", (1080, 1080), (240, 240, 240) if i > 0 else (10, 30, 60))
         color_texto = (30, 30, 30) if i > 0 else (255, 255, 255)
         draw = ImageDraw.Draw(img)
-        dibujar_texto_centrado(draw, texto.upper(), 1080, 400, cargar_fuente(70), color=color_texto)
+        dibujar_texto_centrado(draw, str(texto).upper(), 1080, 400, cargar_fuente(70), color=color_texto)
         if i == len(diapositivas)-1:
             draw.rectangle([200, 800, 880, 900], fill=(255, 196, 0))
             dibujar_texto_centrado(draw, "COMENTA PARA RECIBIR LA GUÍA", 1080, 820, cargar_fuente(40), color=(0,0,0))
@@ -178,9 +230,10 @@ def generar_pdf_linkedin(contenido: dict):
     
     if imagenes:
         imagenes[0].save("linkedin_carrusel.pdf", save_all=True, append_images=imagenes[1:])
+        log.info("💼 PDF LinkedIn generado.")
 
 # ---------------------------------------------------------------------------
-# 5. MONTAJE DE VÍDEO (ESPAÑOL Y FRANCÉS)
+# 5. MONTAJE DE VÍDEO (ESPAÑOL)
 # ---------------------------------------------------------------------------
 async def generar_audio(texto: str, archivo: str, voz: str) -> list:
     com = edge_tts.Communicate(texto, voz, rate="+6%", boundary="WordBoundary")
@@ -200,9 +253,9 @@ def render_texto_rgba(texto, w, tam, color, stroke):
     d.text(((w-ancho)/2, 10), texto, font=fuente, fill=color, stroke_width=stroke, stroke_fill=(0,0,0,255))
     return np.array(img)
 
-def montar_video(script: str, hook: str, archivo_salida: str, voz_id: str, fondos_paths: list):
-    audio_path = "temp.mp3"
-    eventos = asyncio.run(generar_audio(script, audio_path, voz_id))
+def montar_video(script: str, hook: str, archivo_salida: str, fondos_paths: list):
+    audio_path = "temp_voice.mp3"
+    eventos = asyncio.run(generar_audio(script, audio_path, "es-ES-AlvaroNeural"))
     voz = AudioFileClip(audio_path)
     dur = voz.duration + 0.5
     
@@ -258,30 +311,29 @@ def montar_video(script: str, hook: str, archivo_salida: str, voz_id: str, fondo
 # MAIN
 # ---------------------------------------------------------------------------
 def main():
-    log.info("🚀 Arrancando Agencia 360 Omnicanal...")
+    log.info("🚀 Arrancando Agencia 360 (Versión 100% Español)...")
     api_key = os.environ.get("GROQ_API_KEY")
     if not api_key: raise ErrorFatal("Falta GROQ_API_KEY.")
 
     df = descargar_csv(CSV_URL)
     prod = df.sample(n=1).iloc[0]
     nombre, problemas, palabra = prod["NOMBRE_PRODUCTO"], prod["PROBLEMAS_QUE_RESUELVE"], prod["PALABRA_CLAVE_MANYCHAT"]
+    enlace = prod["ENLACE_HOTMART"]
 
     prompt = f"""
     Copywriter B2B logística. Producto: '{nombre}'. Problema: '{problemas}'.
-    Debes generar contenido para 5 redes sociales distintas.
+    Debes generar contenido de alta conversión en ESPAÑOL.
     
-    JSON REQUERIDO:
-    - video_script_es (Español, max 60 palabras, dolor + solución + CTA 'Comenta {palabra}')
-    - video_script_fr (Francés, traducción exacta del script español)
-    - hook_es (max 6 palabras)
-    - hook_fr (max 6 palabras francés)
-    - tiktok_fr_caption (Texto para TikTok en francés con hashtags)
-    - ig_reel_es_caption (Texto para Instagram en español con hashtags)
+    JSON REQUERIDO EXACTO:
+    - video_script (Español, max 60 palabras, dolor + solución + CTA 'Comenta {palabra}')
+    - hook_text (max 6 palabras de impacto)
+    - tiktok_caption (Texto para TikTok con hashtags)
+    - ig_reel_caption (Texto para Instagram Reels con hashtags)
     - ig_post_image_text (Frase corta técnica para imagen estática de Instagram)
-    - youtube_seo (title y description para Shorts en español)
-    - pinterest_pins (Array de 3 objetos con 'title', 'description' y CTA)
-    - linkedin_story (Post texto narrativo contando una anécdota real de la trinchera logística, sin hashtags excesivos)
-    - linkedin_pdf_slides (Array de 3 strings cortos con lecciones de logística para el PDF)
+    - youtube_seo (Objeto con 'title' y 'description')
+    - pinterest_pins (Array de 3 objetos, cada uno con 'title' y 'description' que incluya CTA)
+    - linkedin_story (Post texto narrativo contando una anécdota real de la trinchera logística)
+    - linkedin_pdf_slides (Array de 3 strings cortos con lecciones de logística para un carrusel)
     """
     
     client = Groq(api_key=api_key)
@@ -289,9 +341,15 @@ def main():
     
     # 1. TEXTOS OMNICANAL
     with open("TEXTOS_PARA_REDES.txt", "w", encoding="utf-8") as f:
-        f.write(f"=== TIKTOK FRANCIA ===\n{contenido.get('tiktok_fr_caption', '')}\n\n")
-        f.write(f"=== IG YOUTUBE ESPAÑA ===\n{contenido.get('ig_reel_es_caption', '')}\n\n")
-        f.write(f"=== LINKEDIN STORY ===\n{contenido.get('linkedin_story', '')}\n")
+        f.write(f"=== TIKTOK ===\n{contenido.get('tiktok_caption', '')}\n\n")
+        f.write(f"=== INSTAGRAM REELS ===\n{contenido.get('ig_reel_caption', '')}\n\n")
+        f.write(f"=== LINKEDIN STORY ===\n{contenido.get('linkedin_story', '')}\n\n")
+        
+        yt = contenido.get('youtube_seo', {})
+        if isinstance(yt, dict):
+            f.write(f"=== YOUTUBE SHORTS ===\nTítulo: {yt.get('title', '')}\nDescripción: {yt.get('description', '')}\n\n")
+            
+        f.write(f"=== ENLACE DIRECTO ===\n{enlace}\n")
 
     # 2. IMÁGENES Y PDF
     log.info("🖼️ Fabricando Pines, Post IG y PDF LinkedIn...")
@@ -299,22 +357,23 @@ def main():
     generar_post_ig(contenido)
     generar_pdf_linkedin(contenido)
 
-    # 3. VÍDEOS (ESPAÑA Y FRANCIA)
+    # 3. VÍDEOS MAESTRO (TIKTOK / REELS / SHORTS)
     log.info("🎬 Descargando fondos maestros de Pexels...")
     fondos = obtener_fondos_pexels()
     
-    log.info("🇪🇸 Renderizando MP4 España...")
-    montar_video(contenido.get("video_script_es", "Problemas de aduana. Comenta."), 
-                 contenido.get("hook_es", ""), "video_ig_yt_es.mp4", "es-ES-AlvaroNeural", fondos)
-                 
-    log.info("🇫🇷 Renderizando MP4 Francia...")
-    montar_video(contenido.get("video_script_fr", "Problèmes de douane. Commente."), 
-                 contenido.get("hook_fr", ""), "video_tiktok_fr.mp4", "fr-FR-HenriNeural", fondos)
+    log.info("🎞️ Renderizando MP4 B2B...")
+    guion = str(contenido.get("video_script", f"Problemas logísticos. Comenta {palabra}"))
+    hook = str(contenido.get("hook_text", ""))
+    
+    montar_video(guion, hook, "video_final.mp4", fondos)
 
     for f in fondos:
         if os.path.exists(f): os.remove(f)
 
-    log.info("🏁 Operación Agencia 360 finalizada.")
+    log.info("🏁 Operación Agencia 360 finalizada con éxito.")
 
 if __name__ == "__main__":
-    main()
+    try: main()
+    except Exception as e:
+        log.error(f"❌ ERROR FATAL: {e}")
+        sys.exit(1)
