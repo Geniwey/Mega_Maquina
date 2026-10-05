@@ -214,7 +214,7 @@ def fabricar_video_mp4(script_texto: str):
         
     except Exception as e:
         log.warning(f"⚠️ El extractor de vídeo falló ({e}). Activando Plan B corporativo...")
-        img_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/b/b2/Port_of_Rotterdam_-_Maasvlakte_-_ECT_2.jpg/1280px-Port_of_Rotterdam_-_Maasvlakte_-_ECT_2.jpg"
+        img_url = "https://images.unsplash.com/photo-1586528116311-ad8dd3c8310d?q=80&w=1280"
         img_path = "temp_bg.jpg"
         headers = {'User-Agent': 'Mozilla/5.0'}
         r = requests.get(img_url, headers=headers, stream=True, timeout=15)
@@ -222,7 +222,7 @@ def fabricar_video_mp4(script_texto: str):
             for chunk in r.iter_content(1024):
                 f.write(chunk)
         video_fondo = ImageClip(img_path)
-        log.info("✅ Fotografía del Puerto de Rotterdam cargada correctamente.")
+        log.info("✅ Imagen corporativa (Contenedores) cargada correctamente.")
 
     audio_clip = AudioFileClip(audio_path)
     duracion = audio_clip.duration
@@ -292,7 +292,18 @@ video_script, tiktok_data (caption, hashtags), ig_reel_data (caption, hashtags),
     with open(ARCHIVO_JSON, "w", encoding="utf-8") as f:
         json.dump(contenido, f, ensure_ascii=False, indent=2)
 
-    guion_voz = contenido["video_script"]
+    # APLASTADOR DE FORMATOS: Garantiza texto puro independientemente de lo que envíe la IA
+    guion_voz = contenido.get("video_script", "")
+    if isinstance(guion_voz, dict):
+        guion_voz = " ".join(str(v) for v in guion_voz.values())
+    elif isinstance(guion_voz, list):
+        guion_voz = " ".join(str(x) for x in guion_voz)
+    
+    guion_voz = str(guion_voz).strip()
+    
+    if not guion_voz:
+        guion_voz = f"Evita problemas de aduanas y sobrecostes. Comenta {palabra_clave} y te ayudo con la {nombre}."
+
     fabricar_video_mp4(guion_voz)
 
     log.info("🏁 Pipeline completo y profesional finalizado.")
