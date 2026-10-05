@@ -20,293 +20,201 @@ if not hasattr(PIL.Image, 'ANTIALIAS'):
     except AttributeError:
         PIL.Image.ANTIALIAS = PIL.Image.LANCZOS
 
-from moviepy.editor import VideoFileClip, AudioFileClip, ImageClip, concatenate_videoclips
+from moviepy.editor import VideoFileClip, AudioFileClip, ImageClip, TextClip, CompositeVideoClip, concatenate_videoclips
 
 # ---------------------------------------------------------------------------
 # CONFIGURACIÓN
 # ---------------------------------------------------------------------------
 SHEET_ID = "10gJJCIlPzCHYEfPYPKgT3-xjUtghbIaYpdR87Da4JPQ"
 CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv"
-
-COLUMNAS_REQUERIDAS = [
-    "NOMBRE_PRODUCTO",
-    "PROBLEMAS_QUE_RESUELVE",
-    "PALABRA_CLAVE_MANYCHAT",
-    "ENLACE_HOTMART",
-]
-
+COLUMNAS_REQUERIDAS = ["NOMBRE_PRODUCTO", "PROBLEMAS_QUE_RESUELVE", "PALABRA_CLAVE_MANYCHAT", "ENLACE_HOTMART"]
 ARCHIVO_JSON = "contenido_hoy.json"
+ARCHIVO_TXT = "TEXTOS_PARA_REDES.txt"
 ARCHIVO_VIDEO = "video_final.mp4"
-
 MAX_REINTENTOS = 3
 ESPERA_BASE_SEG = 5
-TIMEOUT_CSV_SEG = 30
-TIMEOUT_GROQ_SEG = 60
 
-CLAVES_JSON_ESPERADAS = [
-    "video_script",
-    "tiktok_data",
-    "ig_reel_data",
-    "youtube_seo",
-    "pinterest_pins",
-    "linkedin_post",
-]
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)-8s | %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-    stream=sys.stdout,
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-8s | %(message)s", stream=sys.stdout)
 log = logging.getLogger("mega_maquina")
 
-class ErrorFatal(Exception):
-    pass
+class ErrorFatal(Exception): pass
 
 # ---------------------------------------------------------------------------
-# 1. LECTURA Y VALIDACIÓN DEL CSV
+# 1. LECTURA Y VALIDACIÓN
 # ---------------------------------------------------------------------------
 def limpiar_texto(valor) -> str:
     s = str(valor)
     s = "".join(ch for ch in s if unicodedata.category(ch) not in ("Cf", "Cc"))
-    s = s.replace("\u00a0", " ")
-    return s.strip()
+    return s.replace("\u00a0", " ").strip()
 
 def descargar_csv(url: str) -> pd.DataFrame:
     for intento in range(1, MAX_REINTENTOS + 1):
         try:
-            log.info(f"📥 Descargando base de datos B2B (intento {intento}/{MAX_REINTENTOS})...")
-            resp = requests.get(url, timeout=TIMEOUT_CSV_SEG)
+            resp = requests.get(url, timeout=30)
             resp.raise_for_status()
-            df = pd.read_csv(io.StringIO(resp.content.decode("utf-8")), sep=None, engine='python')
-            log.info(f"✅ CSV descargado: {len(df)} filas crudas.")
-            return df
+            return pd.read_csv(io.StringIO(resp.content.decode("utf-8")), sep=None, engine='python')
         except Exception as e:
-            log.warning(f"⚠️ Fallo leyendo CSV: {e}")
-            if intento < MAX_REINTENTOS:
-                time.sleep(ESPERA_BASE_SEG * (2 ** (intento - 1)))
-    raise ErrorFatal("No se pudo leer el CSV.")
+            if intento < MAX_REINTENTOS: time.sleep(ESPERA_BASE_SEG)
+    raise ErrorFatal("Fallo crítico al leer el CSV de Google Sheets.")
 
 def validar_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty:
-        raise ErrorFatal("El DataFrame está vacío.")
-
+    if df is None or df.empty: raise ErrorFatal("Excel vacío.")
     df.columns = [limpiar_texto(c) for c in df.columns]
-
     for c in COLUMNAS_REQUERIDAS:
-        if c not in df.columns:
-            raise ErrorFatal(f"Falta columna obligatoria: '{c}'. Columnas detectadas: {list(df.columns)}")
-
+        if c not in df.columns: raise ErrorFatal(f"Falta columna: {c}")
     df = df[COLUMNAS_REQUERIDAS].dropna().copy()
-    for col in COLUMNAS_REQUERIDAS:
-        df[col] = df[col].map(limpiar_texto)
-
+    for col in COLUMNAS_REQUERIDAS: df[col] = df[col].map(limpiar_texto)
     df = df[(df[COLUMNAS_REQUERIDAS] != "").all(axis=1)]
-
-    if df.empty:
-        raise ErrorFatal("No quedan filas válidas tras la limpieza.")
-
-    log.info(f"✅ {len(df)} fila(s) válida(s) tras validar.")
+    if df.empty: raise ErrorFatal("Sin filas válidas.")
     return df
 
 # ---------------------------------------------------------------------------
-# 2. RADAR DE MODELOS PROFESIONAL
+# 2. INTELIGENCIA ARTIFICIAL
 # ---------------------------------------------------------------------------
 def obtener_mejor_modelo(client: Groq) -> str:
-    log.info("📡 Escaneando inteligencia artificial disponible...")
-    try:
-        modelos_activos = [m.id for m in client.models.list().data]
-        
-        modelos_texto = [
-            m for m in modelos_activos 
-            if "whisper" not in m.lower() 
-            and "guard" not in m.lower() 
-            and "vision" not in m.lower()
-            and "llava" not in m.lower()
-        ]
-        
-        if not modelos_texto:
-            raise ErrorFatal("Groq no devuelve modelos de texto válidos.")
+    modelos_activos = [m.id for m in client.models.list().data]
+    modelos_texto = [m for m in modelos_activos if "whisper" not in m.lower() and "guard" not in m.lower() and "vision" not in m.lower()]
+    for pref in ["llama-3.3-70b-versatile", "llama-3.1-70b-versatile", "mixtral-8x7b-32768"]:
+        if pref in modelos_texto: return pref
+    return modelos_texto[0] if modelos_texto else "llama3-8b-8192"
 
-        preferencias = [
-            "llama-3.3-70b-versatile",
-            "llama-3.1-70b-versatile",
-            "mixtral-8x7b-32768"
-        ]
-        for pref in preferencias:
-            if pref in modelos_texto:
-                log.info(f"⭐ Radar fijado en el modelo principal: {pref}")
-                return pref
-                
-        llamas = [m for m in modelos_texto if 'llama' in m.lower()]
-        if llamas:
-            mejor_llama = sorted(llamas, key=lambda x: "70b" in x.lower(), reverse=True)[0]
-            log.info(f"⭐ Usando alternativa Llama detectada: {mejor_llama}")
-            return mejor_llama
-            
-        qwens = [m for m in modelos_texto if 'qwen' in m.lower()]
-        if qwens:
-            log.info(f"⭐ Usando motor Qwen de alta capacidad: {qwens[0]}")
-            return qwens[0]
-                
-        log.warning(f"⚠️ Usando motor estándar: {modelos_texto[0]}")
-        return modelos_texto[0]
-        
-    except Exception as e:
-        raise ErrorFatal(f"Fallo en el radar de modelos: {e}")
-
-def generar_contenido(client: Groq, prompt: str, modelo_elegido: str) -> dict:
-    for intento in range(1, MAX_REINTENTOS + 1):
+def generar_contenido(client: Groq, prompt: str, modelo: str) -> dict:
+    for _ in range(MAX_REINTENTOS):
         try:
-            log.info(f"🧠 Generando copy experto con {modelo_elegido} (intento {intento}/{MAX_REINTENTOS})...")
-            chat_completion = client.chat.completions.create(
-                messages=[{"role": "user", "content": prompt}],
-                model=modelo_elegido,
-                response_format={"type": "json_object"},
-                temperature=0.7,
-            )
-            texto = chat_completion.choices[0].message.content
-            datos = json.loads(texto)
-            for k in CLAVES_JSON_ESPERADAS:
-                if k not in datos:
-                    raise ValueError(f"Falta clave JSON: {k}")
-            log.info("✅ JSON transaccional validado correctamente.")
-            return datos
-        except Exception as e:
-            log.warning(f"⚠️ Error en Groq: {e}")
-            if intento < MAX_REINTENTOS:
-                time.sleep(ESPERA_BASE_SEG * (2 ** (intento - 1)))
-    raise ErrorFatal("Groq falló tras varios reintentos.")
+            res = client.chat.completions.create(messages=[{"role": "user", "content": prompt}], model=modelo, response_format={"type": "json_object"}, temperature=0.7)
+            return json.loads(res.choices[0].message.content)
+        except Exception:
+            time.sleep(ESPERA_BASE_SEG)
+    raise ErrorFatal("Fallo en la IA.")
 
 # ---------------------------------------------------------------------------
-# 3. LA FÁBRICA VISUAL (100% BLINDADA)
+# 3. EXPORTAR TEXTOS PARA EL USUARIO
 # ---------------------------------------------------------------------------
-async def generar_voz_audio(texto: str, archivo_salida: str):
-    log.info("🎙️ Sintetizando voz en off B2B (Edge TTS)...")
-    comunicador = edge_tts.Communicate(texto, "es-ES-AlvaroNeural")
-    await comunicador.save(archivo_salida)
-    log.info("✅ Audio de voz corporativo generado.")
+def crear_documento_textos(datos: dict):
+    log.info("📝 Generando archivo de textos listos para copiar y pegar...")
+    with open(ARCHIVO_TXT, "w", encoding="utf-8") as f:
+        f.write("=========================================\n")
+        f.write("📱 TIKTOK & INSTAGRAM REELS\n")
+        f.write("=========================================\n")
+        f.write(f"TÍTULO: {datos.get('tiktok_data', {}).get('caption', '')}\n")
+        f.write(f"HASHTAGS: {datos.get('tiktok_data', {}).get('hashtags', '')}\n\n")
+        
+        f.write("=========================================\n")
+        f.write("📍 PINTEREST\n")
+        f.write("=========================================\n")
+        for i, pin in enumerate(datos.get('pinterest_pins', [])):
+            f.write(f"PIN {i+1}: {pin.get('text_on_image', '')}\n")
+        f.write("\n")
+        
+        f.write("=========================================\n")
+        f.write("💼 LINKEDIN (Post Profesional)\n")
+        f.write("=========================================\n")
+        f.write(f"{datos.get('linkedin_post', '')}\n\n")
+        
+        f.write("=========================================\n")
+        f.write("▶️ YOUTUBE SHORTS\n")
+        f.write("=========================================\n")
+        f.write(f"TÍTULO: {datos.get('youtube_seo', {}).get('title', '')}\n")
+        f.write(f"DESCRIPCIÓN: {datos.get('youtube_seo', {}).get('description', '')}\n")
+
+# ---------------------------------------------------------------------------
+# 4. FÁBRICA VISUAL PROFESIONAL
+# ---------------------------------------------------------------------------
+async def generar_voz(texto: str, archivo: str):
+    await edge_tts.Communicate(texto, "es-ES-AlvaroNeural").save(archivo)
+
+def generar_subtitulos(texto: str, duracion_total: float):
+    # Rompe el guion en trozos cortos para leer en pantalla
+    palabras = texto.split()
+    chunks = [" ".join(palabras[i:i+4]) for i in range(0, len(palabras), 4)]
+    dur_chunk = duracion_total / len(chunks)
+    
+    clips = []
+    for i, chunk in enumerate(chunks):
+        # Letras blancas, gordas, con contorno negro
+        txt_clip = TextClip(chunk, fontsize=65, color='white', font='DejaVu-Sans-Bold', 
+                            stroke_color='black', stroke_width=2.5, method='caption', size=(900, None))
+        txt_clip = txt_clip.set_position(('center', 'center')).set_duration(dur_chunk).set_start(i * dur_chunk)
+        clips.append(txt_clip)
+    return clips
 
 def fabricar_video_mp4(script_texto: str):
     audio_path = "temp_voice.mp3"
-    asyncio.run(generar_voz_audio(script_texto, audio_path))
-    
     bg_path = "temp_bg.mp4"
+    img_path = "temp_bg.jpg"
     video_fondo = None
     
-    try:
-        log.info("🎬 Instalando motor de extracción de vídeo profesional...")
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "yt-dlp", "--quiet"])
-        import yt_dlp
-        
-        log.info("🎬 Descargando fondo dinámico de logística (Stock Footage)...")
-        ydl_opts = {
-            'format': 'bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-            'outtmpl': bg_path,
-            'quiet': True,
-            'no_warnings': True
-        }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.extract_info("ytsearch1:cargo ship container port drone aerial HD stock footage no text short", download=True)
-            
-        video_fondo = VideoFileClip(bg_path)
-        log.info("✅ Vídeo dinámico de alta calidad descargado con éxito.")
-        
-    except Exception as e:
-        log.warning(f"⚠️ El extractor de vídeo falló ({e}). Activando Plan B corporativo...")
-        img_url = "https://images.unsplash.com/photo-1586528116311-ad8dd3c8310d?q=80&w=1280"
-        img_path = "temp_bg.jpg"
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        r = requests.get(img_url, headers=headers, stream=True, timeout=15)
-        with open(img_path, "wb") as f:
-            for chunk in r.iter_content(1024):
-                f.write(chunk)
-        video_fondo = ImageClip(img_path)
-        log.info("✅ Imagen corporativa (Contenedores) cargada correctamente.")
-
+    asyncio.run(generar_voz(script_texto, audio_path))
     audio_clip = AudioFileClip(audio_path)
     duracion = audio_clip.duration
     
-    if hasattr(video_fondo, 'duration') and video_fondo.duration and video_fondo.duration > 0:
-        if video_fondo.duration < duracion:
-            repeticiones = int(duracion / video_fondo.duration) + 1
-            video_fondo = concatenate_videoclips([video_fondo] * repeticiones)
-        video_fondo = video_fondo.subclip(0, duracion)
-    else:
-        video_fondo = video_fondo.set_duration(duracion)
+    # 1. Intentar descargar vídeo de barcos
+    try:
+        import yt_dlp
+        opts = {'format': 'bestvideo[ext=mp4]/best', 'outtmpl': bg_path, 'quiet': True}
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            ydl.extract_info("ytsearch1:cargo ship container port drone aerial HD stock footage no text short", download=True)
+        video_fondo = VideoFileClip(bg_path)
+    except:
+        # 2. PLAN B: Si falla, descarga foto de puerto y LE METE MOVIMIENTO (ZOOM)
+        r = requests.get("https://images.unsplash.com/photo-1586528116311-ad8dd3c8310d?q=80&w=1280", stream=True)
+        with open(img_path, "wb") as f:
+            for chunk in r.iter_content(1024): f.write(chunk)
+        # Aquí está la magia: Transforma la foto en un vídeo en movimiento (efecto dron)
+        video_fondo = ImageClip(img_path).resize(lambda t: 1 + 0.015 * t).set_duration(duracion)
 
-    video_fondo = video_fondo.set_audio(audio_clip)
+    # Ajustar tiempo del fondo
+    if video_fondo.duration < duracion:
+        reps = int(duracion / video_fondo.duration) + 1
+        video_fondo = concatenate_videoclips([video_fondo] * reps)
+    video_fondo = video_fondo.subclip(0, duracion).set_audio(audio_clip)
     
-    log.info("⚙️ Renderizando MP4 final para TikTok/Reels...")
-    video_fondo.write_videofile(
-        ARCHIVO_VIDEO,
-        fps=24,
-        codec="libx264",
-        audio_codec="aac",
-        preset="ultrafast",
-        logger=None
-    )
+    # Añadir los subtítulos dinámicos por encima del vídeo
+    clips_subtitulos = generar_subtitulos(script_texto, duracion)
+    video_final = CompositeVideoClip([video_fondo] + clips_subtitulos)
     
-    audio_clip.close()
-    video_fondo.close()
-    if os.path.exists(audio_path): os.remove(audio_path)
-    if os.path.exists(bg_path): os.remove(bg_path)
-    if os.path.exists("temp_bg.jpg"): os.remove("temp_bg.jpg")
+    video_final.write_videofile(ARCHIVO_VIDEO, fps=24, codec="libx264", audio_codec="aac", preset="ultrafast", logger=None)
     
-    log.info(f"✅ ¡Vídeo profesional fabricado con éxito: {ARCHIVO_VIDEO}!")
+    # Limpieza
+    audio_clip.close(); video_fondo.close(); video_final.close()
+    for f in [audio_path, bg_path, img_path]:
+        if os.path.exists(f): os.remove(f)
 
 # ---------------------------------------------------------------------------
 # MAIN
 # ---------------------------------------------------------------------------
 def main():
-    log.info("🚀 Arrancando la Mega Máquina de Contenido...")
+    log.info("🚀 Arrancando la Mega Máquina Profesional...")
     api_key = os.environ.get("GROQ_API_KEY")
-    if not api_key:
-        raise ErrorFatal("Falta GROQ_API_KEY en los Secrets.")
+    if not api_key: raise ErrorFatal("Falta GROQ_API_KEY")
 
     df = validar_dataframe(descargar_csv(CSV_URL))
     prod = df.sample(n=1).iloc[0]
     
-    nombre = prod["NOMBRE_PRODUCTO"]
-    problemas = prod["PROBLEMAS_QUE_RESUELVE"]
-    palabra_clave = prod["PALABRA_CLAVE_MANYCHAT"]
-    enlace = prod["ENLACE_HOTMART"]
+    nombre, problemas, palabra = prod["NOMBRE_PRODUCTO"], prod["PROBLEMAS_QUE_RESUELVE"], prod["PALABRA_CLAVE_MANYCHAT"]
+    log.info(f"🎯 Producto: {nombre}")
 
-    log.info(f"🎯 Producto seleccionado hoy: {nombre}")
-
-    client = Groq(api_key=api_key, timeout=TIMEOUT_GROQ_SEG, max_retries=0)
-    
-    mejor_modelo = obtener_mejor_modelo(client)
+    client = Groq(api_key=api_key, max_retries=0)
+    modelo = obtener_mejor_modelo(client)
 
     prompt = f"""
-Actúa como un copywriter B2B experto en logística y comercio internacional.
-Vende este producto: '{nombre}'. Problemas que soluciona: '{problemas}'.
-REGLAS: Cero niños, dolor de e-commerce/importadores real, usa jerga (Demurrage, DUA, Incoterms), CTA duro pidiendo comentar '{palabra_clave}'.
-Devuelve estrictamente un JSON con estas claves:
-video_script, tiktok_data (caption, hashtags), ig_reel_data (caption, hashtags), youtube_seo (title, description), pinterest_pins (array de objetos con text_on_image), linkedin_post.
-"""
-
-    contenido = generar_contenido(client, prompt, mejor_modelo)
-    contenido["_meta"] = {"producto": nombre, "enlace": enlace, "modelo_usado": mejor_modelo}
-
-    with open(ARCHIVO_JSON, "w", encoding="utf-8") as f:
-        json.dump(contenido, f, ensure_ascii=False, indent=2)
-
-    # APLASTADOR DE FORMATOS: Garantiza texto puro independientemente de lo que envíe la IA
-    guion_voz = contenido.get("video_script", "")
-    if isinstance(guion_voz, dict):
-        guion_voz = " ".join(str(v) for v in guion_voz.values())
-    elif isinstance(guion_voz, list):
-        guion_voz = " ".join(str(x) for x in guion_voz)
+    Actúa como copywriter B2B experto en logística. Vende: '{nombre}'. Soluciona: '{problemas}'.
+    REGLAS: Dolor de e-commerce real, jerga (Demurrage, DUA, Incoterms), CTA pidiendo comentar '{palabra}'.
+    Devuelve STRICTAMENTE JSON: video_script (texto puro sin diccionario), tiktok_data (caption, hashtags), ig_reel_data (caption, hashtags), youtube_seo (title, description), pinterest_pins (lista con text_on_image), linkedin_post.
+    """
     
-    guion_voz = str(guion_voz).strip()
+    contenido = generar_contenido(client, prompt, modelo)
     
-    if not guion_voz:
-        guion_voz = f"Evita problemas de aduanas y sobrecostes. Comenta {palabra_clave} y te ayudo con la {nombre}."
+    # Crear archivo de texto para el usuario
+    crear_documento_textos(contenido)
 
-    fabricar_video_mp4(guion_voz)
-
-    log.info("🏁 Pipeline completo y profesional finalizado.")
+    # Asegurar que el guion es texto puro para la voz
+    guion = contenido.get("video_script", "")
+    if isinstance(guion, dict): guion = " ".join(str(v) for v in guion.values())
+    elif isinstance(guion, list): guion = " ".join(str(x) for x in guion)
+    
+    fabricar_video_mp4(str(guion).strip())
+    log.info("🏁 Pipeline completado.")
 
 if __name__ == "__main__":
     try:
