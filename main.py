@@ -69,8 +69,37 @@ def descargar_csv(url: str) -> pd.DataFrame:
     raise ErrorFatal("Fallo crítico leyendo CSV.")
 
 # ---------------------------------------------------------------------------
-# 2. IA: RADAR Y GENERACIÓN BLINDADA
+# 2. IA: RADAR DE MODELOS (RESTAURANDO EL GPT-OSS Y LLISTA FIABLE)
 # ---------------------------------------------------------------------------
+EXCLUIR_EN_NOMBRE = ("whisper", "guard", "safeguard", "vision", "llava", "orpheus", "tts", "playai", "embed", "distil-whisper")
+PREFERENCIAS = [
+    "openai/gpt-oss-20b", 
+    "openai/gpt-oss-120b", 
+    "llama-3.3-70b-versatile", 
+    "qwen/qwen3",
+    "llama-3.1-70b-versatile", 
+    "mixtral", 
+    "gemma"
+]
+
+def obtener_modelos_candidatos(client: Groq) -> list:
+    log.info("📡 Escaneando modelos disponibles en Groq...")
+    try:
+        activos = [m.id for m in client.models.list().data]
+    except Exception as e:
+        raise ErrorFatal(f"Fallo en el radar: {e}")
+    
+    texto = [m for m in activos if not any(x in m.lower() for x in EXCLUIR_EN_NOMBRE)]
+    if not texto: raise ErrorFatal("Groq no devuelve modelos de texto.")
+    
+    ordenados = []
+    for pref in PREFERENCIAS:
+        for m in texto:
+            if pref in m.lower() and m not in ordenados: ordenados.append(m)
+            
+    resto = [m for m in texto if m not in ordenados]
+    return ordenados + resto
+
 def extraer_json(texto: str) -> dict:
     t = re.sub(r"<think>.*?</think>", "", texto, flags=re.DOTALL).strip()
     t = re.sub(r"^```(?:json)?|```$", "", t, flags=re.MULTILINE).strip()
@@ -81,12 +110,14 @@ def extraer_json(texto: str) -> dict:
         return json.loads(t[ini:fin + 1])
 
 def generar_contenido(client: Groq, prompt: str):
-    modelos = ["llama-3.3-70b-versatile", "llama-3.1-70b-versatile", "mixtral-8x7b-32768", "llama3-8b-8192"]
+    modelos = obtener_modelos_candidatos(client)
+    log.info(f"⭐ Modelos ordenados a probar: {modelos}")
+    
     for modelo in modelos:
         modo_minimo = False
-        for intento in range(1, 4):
+        for intento in range(1, 3):
             try:
-                log.info(f"🧠 Prompting {modelo} (Intento {intento}, Modo {'mínimo' if modo_minimo else 'normal'})...")
+                log.info(f"🧠 Generando con {modelo} (intento {intento})...")
                 kwargs = dict(
                     messages=[
                         {"role": "system", "content": "Responde SOLO con un objeto JSON válido, sin texto extra."},
@@ -104,21 +135,16 @@ def generar_contenido(client: Groq, prompt: str):
                 for k in CLAVES_JSON_ESPERADAS:
                     if k not in datos: raise ValueError(f"Falta clave JSON: {k}")
                 
-                log.info(f"✅ JSON 360 validado correctamente con {modelo}.")
+                log.info(f"✅ JSON validado correctamente con {modelo}.")
                 return datos
                 
             except Exception as e:
                 msg = str(e).lower()
                 log.warning(f"⚠️ Error {modelo}: {e}")
-                
                 if ("400" in msg or "json" in msg or "format" in msg) and not modo_minimo:
-                    log.warning("↩️ Reintentando sin formato JSON estricto...")
                     modo_minimo = True
                     continue
-                if "429" in msg or "rate" in msg:
-                    time.sleep(15)
-                    continue
-                time.sleep(5)
+                time.sleep(3)
         log.warning(f"⏭️ Pasando al siguiente modelo tras fallar {modelo}.")
     raise ErrorFatal("Colapso total de la IA. Ningún modelo funcionó.")
 
@@ -179,12 +205,9 @@ def dibujar_texto_centrado(draw, texto, w, y, fuente, color=(255,255,255), strok
 def generar_pines(contenido: dict):
     os.makedirs(CARPETA_PINES, exist_ok=True)
     pines = contenido.get("pinterest_pins", [])
-    
-    # Blindaje contra diccionarios accidentales
     if isinstance(pines, dict):
         pines = list(pines.values()) if all(isinstance(v, dict) for v in pines.values()) else [pines]
-    if not isinstance(pines, list):
-        pines = []
+    if not isinstance(pines, list): pines = []
         
     for i, p in enumerate(pines[:3]):
         if isinstance(p, str): p = {"title": p}
@@ -235,8 +258,8 @@ def generar_pdf_linkedin(contenido: dict):
 # ---------------------------------------------------------------------------
 # 5. MONTAJE DE VÍDEO (ESPAÑOL)
 # ---------------------------------------------------------------------------
-async def generar_audio(texto: str, archivo: str, voz: str) -> list:
-    com = edge_tts.Communicate(texto, voz, rate="+6%", boundary="WordBoundary")
+async def generar_audio(texto: str, archivo: str) -> list:
+    com = edge_tts.Communicate(texto, "es-ES-AlvaroNeural", rate="+6%", boundary="WordBoundary")
     eventos = []
     with open(archivo, "wb") as f:
         async for chunk in com.stream():
@@ -255,7 +278,7 @@ def render_texto_rgba(texto, w, tam, color, stroke):
 
 def montar_video(script: str, hook: str, archivo_salida: str, fondos_paths: list):
     audio_path = "temp_voice.mp3"
-    eventos = asyncio.run(generar_audio(script, audio_path, "es-ES-AlvaroNeural"))
+    eventos = asyncio.run(generar_audio(script, audio_path))
     voz = AudioFileClip(audio_path)
     dur = voz.duration + 0.5
     
@@ -280,7 +303,6 @@ def montar_video(script: str, hook: str, archivo_salida: str, fondos_paths: list
         arr = render_texto_rgba(hook.upper(), 960, 60, (255,255,255,255), 4)
         capas.append(ImageClip(arr).set_start(0).set_duration(3.0).set_position(("center", 250)))
 
-    # Subtítulos Hormozi (1-2 palabras)
     tokens = []
     for ini, d_ev, t in eventos:
         ws = t.split()
@@ -311,7 +333,7 @@ def montar_video(script: str, hook: str, archivo_salida: str, fondos_paths: list
 # MAIN
 # ---------------------------------------------------------------------------
 def main():
-    log.info("🚀 Arrancando Agencia 360 (Versión 100% Español)...")
+    log.info("🚀 Arrancando Agencia 360 (100% Español)...")
     api_key = os.environ.get("GROQ_API_KEY")
     if not api_key: raise ErrorFatal("Falta GROQ_API_KEY.")
 
@@ -339,25 +361,20 @@ def main():
     client = Groq(api_key=api_key)
     contenido = generar_contenido(client, prompt)
     
-    # 1. TEXTOS OMNICANAL
     with open("TEXTOS_PARA_REDES.txt", "w", encoding="utf-8") as f:
         f.write(f"=== TIKTOK ===\n{contenido.get('tiktok_caption', '')}\n\n")
         f.write(f"=== INSTAGRAM REELS ===\n{contenido.get('ig_reel_caption', '')}\n\n")
         f.write(f"=== LINKEDIN STORY ===\n{contenido.get('linkedin_story', '')}\n\n")
-        
         yt = contenido.get('youtube_seo', {})
         if isinstance(yt, dict):
             f.write(f"=== YOUTUBE SHORTS ===\nTítulo: {yt.get('title', '')}\nDescripción: {yt.get('description', '')}\n\n")
-            
         f.write(f"=== ENLACE DIRECTO ===\n{enlace}\n")
 
-    # 2. IMÁGENES Y PDF
     log.info("🖼️ Fabricando Pines, Post IG y PDF LinkedIn...")
     generar_pines(contenido)
     generar_post_ig(contenido)
     generar_pdf_linkedin(contenido)
 
-    # 3. VÍDEOS MAESTRO (TIKTOK / REELS / SHORTS)
     log.info("🎬 Descargando fondos maestros de Pexels...")
     fondos = obtener_fondos_pexels()
     
