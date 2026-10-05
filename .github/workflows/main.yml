@@ -19,20 +19,22 @@ jobs:
       - name: 📦 Instalar herramientas multimedia y librerías
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg imagemagick fonts-dejavu
-          sudo sed -i 's/none/read,write/g' /etc/ImageMagick-6/policy.xml
-          pip install pandas groq requests edge-tts moviepy==1.0.3 pillow yt-dlp
+          sudo apt-get install -y ffmpeg fonts-dejavu fonts-liberation fonts-freefont-ttf
+          pip install pandas groq requests edge-tts moviepy==1.0.3 pillow numpy
 
       - name: 🚀 Ejecutar la Fábrica de Contenido
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
         run: |
           python main.py
 
-      - name: 🗂️ Entregar Vídeos y Textos al Usuario
+      - name: 🗂️ Entregar Vídeos, Imágenes y Textos
         uses: actions/upload-artifact@v4
         with:
-          name: Paquete_Contenido_Hoy
+          name: Paquete_Contenido_Premium
           path: |
-            TEXTOS_PARA_REDES.txt
             video_final.mp4
+            contenido_hoy.json
+            TEXTOS_PARA_REDES.txt
+            pines/
