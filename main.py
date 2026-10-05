@@ -158,4 +158,254 @@ def render_texto_rgba(texto, ancho, tam, color=(255, 255, 255, 255), stroke=0, f
     alto_linea = int(tam * 1.22)
     alto = len(lineas) * alto_linea + 2 * pad
     img = Image.new("RGBA", (ancho, alto), (0, 0, 0, 0))
-    d
+    d = ImageDraw.Draw(img)
+    if fondo: d.rounded_rectangle([0, 0, ancho - 1, alto - 1], radius=radio, fill=fondo)
+    y = pad
+    for linea in lineas:
+        w = d.textlength(linea, font=fuente)
+        d.text(((ancho - w) / 2, y), linea, font=fuente, fill=color, stroke_width=stroke, stroke_fill=color_stroke)
+        y += alto_linea
+    return np.array(img)
+
+def crear_pin(texto: str, etiqueta: str, ruta: str, paleta):
+    W, H = 1000, 1500
+    g = np.linspace(0, 1, H).reshape(H, 1, 1)
+    fila = np.array(paleta[0]).reshape(1, 1, 3) * (1 - g) + np.array(paleta[1]).reshape(1, 1, 3) * g
+    img = Image.fromarray(np.repeat(fila, W, axis=1).astype("uint8"), "RGB").convert("RGBA")
+    
+    deco = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    dd = ImageDraw.Draw(deco)
+    dd.ellipse([-250, -250, 450, 450], fill=(255, 255, 255, 18))
+    img = Image.alpha_composite(img, deco)
+    d = ImageDraw.Draw(img)
+
+    fe = cargar_fuente(38)
+    d.text(((W - d.textlength(etiqueta[:48], font=fe)) / 2, 150), etiqueta[:48], font=fe, fill=(255, 196, 0, 255))
+    d.rectangle([W / 2 - 60, 215, W / 2 + 60, 224], fill=(255, 196, 0, 255))
+
+    tam = 130
+    while True:
+        fuente = cargar_fuente(tam)
+        lineas = ajustar_lineas(d, texto, fuente, 840)
+        if len(lineas) * int(tam * 1.2) <= 880 or tam <= 56: break
+        tam -= 6
+        
+    y = 270 + (900 - len(lineas) * int(tam * 1.2)) / 2
+    for linea in lineas:
+        w = d.textlength(linea, font=fuente)
+        d.text(((W - w) / 2, y), linea, font=fuente, fill=(255, 255, 255, 255), stroke_width=3, stroke_fill=(0, 0, 0, 120))
+        y += int(tam * 1.2)
+
+    fb = cargar_fuente(46)
+    btn = "GUARDA ESTE PIN"
+    wb = d.textlength(btn, font=fb)
+    d.rounded_rectangle([W / 2 - wb / 2 - 50, 1230, W / 2 + wb / 2 + 50, 1320], radius=45, fill=(255, 196, 0, 255))
+    d.text(((W - wb) / 2, 1246), btn, font=fb, fill=(0, 0, 0, 255))
+
+    img.convert("RGB").save(ruta, "JPEG", quality=92)
+
+def fabricar_pines(contenido: dict, nombre: str):
+    os.makedirs(CARPETA_PINES, exist_ok=True)
+    pines = contenido.get("pinterest_pins", [])
+    paletas = [((10, 25, 60), (30, 90, 170)), ((15, 15, 25), (130, 40, 50)), ((8, 50, 60), (20, 140, 150))]
+    for i, p in enumerate(pines[:3]):
+        texto = p.get("text_on_image", "Importación")
+        ruta = os.path.join(CARPETA_PINES, f"pin_{i+1}.jpg")
+        crear_pin(texto, nombre, ruta, paletas[i % len(paletas)])
+        log.info(f"📌 Pin {i+1} creado.")
+
+# ---------------------------------------------------------------------------
+# 4. FONDOS MÚLTIPLES DE PEXELS (CAMBIO DE PLANO CADA 2.5 SEG)
+# ---------------------------------------------------------------------------
+def descargar_fondos_pexels(n: int) -> list:
+    api_key = os.environ.get("PEXELS_API_KEY")
+    if not api_key:
+        log.warning("⚠️ Sin PEXELS_API_KEY. Usando fondos generados por código.")
+        return []
+        
+    consultas = ["cargo ship", "logistics port", "shipping containers", "freight ship", "warehouse forklift"]
+    random.shuffle(consultas)
+    rutas = []
+    
+    for consulta in consultas:
+        if len(rutas) >= n: break
+        try:
+            log.info(f"🔎 Buscando clip en Pexels: '{consulta}'...")
+            r = requests.get(f"https://api.pexels.com/videos/search?query={consulta}&orientation=portrait&per_page=10",
+                             headers={"Authorization": api_key}, timeout=30)
+            videos = r.json().get("videos", [])
+            if not videos: continue
+            
+            v = random.choice(videos)
+            archivos = [f for f in v["video_files"] if f["height"] >= 1080 and f["file_type"] == "video/mp4"]
+            elegido = archivos[0] if archivos else v["video_files"][0]
+            
+            ruta = f"temp_bg_{len(rutas)}.mp4"
+            with requests.get(elegido["link"], stream=True, timeout=60) as resp:
+                with open(ruta, "wb") as f:
+                    for chunk in resp.iter_content(chunk_size=1024 * 256):
+                        if chunk: f.write(chunk)
+            rutas.append(ruta)
+            log.info(f"✅ Clip de Pexels descargado.")
+        except Exception as e:
+            log.warning(f"⚠️ Pexels falló con '{consulta}': {e}")
+            
+    return rutas
+
+def a_vertical(clip):
+    return clip.resize(height=1920).crop(x_center=clip.w / 2, y_center=1920 / 2, width=1080, height=1920)
+
+def construir_fondo_multicamara(rutas: list, duracion: float):
+    base = []
+    for r in rutas:
+        try:
+            c = VideoFileClip(r).without_audio()
+            if c.duration > 1.0: base.append(a_vertical(c))
+        except: pass
+        
+    if not base: raise ErrorFatal("Ningún clip descargado sirve.")
+    
+    segmentos = []
+    total = 0.0
+    i = 0
+    # BATIDORA DE CLIPS: Cambia de plano cada SEGUNDOS_POR_PLANO
+    while total < duracion:
+        c = base[i % len(base)]
+        d = min(SEGUNDOS_POR_PLANO, c.duration)
+        # Extraer un cacho del clip
+        segmentos.append(c.subclip(0, d))
+        total += d
+        i += 1
+        
+    return concatenate_videoclips(segmentos, method="compose").subclip(0, duracion)
+
+# ---------------------------------------------------------------------------
+# 5. AUDIO Y SUBTÍTULOS HORMOZI
+# ---------------------------------------------------------------------------
+async def generar_voz_y_tiempos(texto: str, archivo_salida: str) -> list:
+    com = edge_tts.Communicate(texto, VOZ, rate=VELOCIDAD_VOZ, boundary="WordBoundary")
+    eventos = []
+    with open(archivo_salida, "wb") as f:
+        async for chunk in com.stream():
+            if chunk["type"] == "audio": f.write(chunk["data"])
+            elif chunk["type"] in ("WordBoundary", "SentenceBoundary"):
+                eventos.append((chunk["offset"] / 1e7, chunk["duration"] / 1e7, chunk["text"]))
+    return eventos
+
+def construir_subtitulos(eventos: list, texto: str, duracion: float) -> list:
+    tokens = []
+    for ini, dur, t in eventos:
+        ws = t.split()
+        if not ws: continue
+        paso = dur / len(ws) if dur > 0 else 0.3
+        for k, w in enumerate(ws): tokens.append((ini + k * paso, ini + (k + 1) * paso, w))
+    
+    if not tokens:
+        ws = texto.split()
+        paso = duracion / max(len(ws), 1)
+        tokens = [(k * paso, (k + 1) * paso, w) for k, w in enumerate(ws)]
+        
+    # AGRUPAR DE 1 A 2 PALABRAS (Ritmo rápido para retención)
+    grupos = []
+    for i in range(0, len(tokens), 2):
+        b = tokens[i:i + 2]
+        grupos.append([b[0][0], b[-1][1], " ".join(x[2] for x in b)])
+        
+    for j in range(len(grupos) - 1): grupos[j][1] = grupos[j + 1][0]
+    if grupos: grupos[-1][1] = min(duracion, grupos[-1][1] + 0.3)
+    return [tuple(g) for g in grupos]
+
+# ---------------------------------------------------------------------------
+# 6. MONTAJE DE VÍDEO FINAL
+# ---------------------------------------------------------------------------
+def fabricar_video_mp4(script_texto: str, hook_texto: str, cta_texto: str):
+    audio_path = "temp_voice.mp3"
+    eventos = asyncio.run(generar_voz_y_tiempos(script_texto, audio_path))
+    voz = AudioFileClip(audio_path)
+    duracion = voz.duration + 0.5
+
+    log.info("🎬 Descargando y montando metraje multicámara...")
+    rutas_bg = descargar_fondos_pexels(NUM_FONDOS)
+    
+    if rutas_bg:
+        fondo = construir_fondo_multicamara(rutas_bg, duracion)
+    else:
+        # Fondo oscuro de emergencia si Pexels falla
+        fondo = ColorClip((1080, 1920), color=(15, 23, 42)).set_duration(duracion)
+
+    # Oscurecer fondo al 30% para que los subtítulos destaquen siempre
+    oscuro = ColorClip((1080, 1920), color=(0, 0, 0)).set_opacity(0.3).set_duration(duracion)
+    capas = [fondo, oscuro]
+
+    # Subtítulos dinámicos en el centro
+    for i, (ini, fin, texto) in enumerate(construir_subtitulos(eventos, script_texto, duracion)):
+        t = texto.strip().upper()
+        if not t: continue
+        # Intercala colores para mayor impacto visual
+        color = (255, 196, 0, 255) if i % 4 == 0 else (255, 255, 255, 255)
+        arr = render_texto_rgba(t, 980, 110, color=color, stroke=6, pad=20)
+        capas.append(ImageClip(arr).set_start(ini).set_duration(fin - ini).set_position(("center", "center")))
+
+    # Gancho estático arriba
+    if hook_texto:
+        arr = render_texto_rgba(hook_texto.upper(), 960, 60, fondo=(0, 0, 0, 175), pad=25)
+        capas.append(ImageClip(arr).set_start(0).set_duration(min(4.0, duracion)).set_position(("center", 250)))
+
+    # CTA al final
+    if cta_texto:
+        arr = render_texto_rgba(cta_texto.upper(), 960, 66, color=(0, 0, 0, 255), fondo=(255, 196, 0, 240), pad=34)
+        ini_cta = max(duracion - 4.5, 0)
+        capas.append(ImageClip(arr).set_start(ini_cta).set_duration(duracion - ini_cta).set_position(("center", 1300)))
+
+    final = CompositeVideoClip(capas, size=(1080, 1920)).set_duration(duracion).set_audio(voz)
+
+    log.info("⚙️ Renderizando MP4 final...")
+    final.write_videofile(ARCHIVO_VIDEO, fps=24, codec="libx264", audio_codec="aac", preset="ultrafast", logger=None)
+
+    voz.close(); final.close()
+    for p in [audio_path] + rutas_bg:
+        if os.path.exists(p): os.remove(p)
+
+# ---------------------------------------------------------------------------
+# MAIN
+# ---------------------------------------------------------------------------
+def main():
+    log.info("🚀 Arrancando la Máquina Multicámara...")
+    api_key = os.environ.get("GROQ_API_KEY")
+    if not api_key: raise ErrorFatal("Falta GROQ_API_KEY")
+
+    df = validar_dataframe(descargar_csv(CSV_URL))
+    prod = df.sample(n=1).iloc[0]
+    nombre, problemas, palabra = prod["NOMBRE_PRODUCTO"], prod["PROBLEMAS_QUE_RESUELVE"], prod["PALABRA_CLAVE_MANYCHAT"]
+
+    client = Groq(api_key=api_key, max_retries=0)
+    modelos = obtener_modelos_candidatos(client)
+
+    prompt = f"""
+    Copywriter B2B logística. Vende: '{nombre}'. Soluciona: '{problemas}'.
+    Guion de UN SOLO TEXTO CONTINUO (60 palabras max):
+    1) Gancho de dolor
+    2) Problema agravado
+    3) Beneficios
+    4) CTA: Comenta '{palabra}'
+    Devuelve JSON con: video_script, hook_text (max 6 palabras), cta_text, tiktok_data, ig_reel_data, youtube_seo, pinterest_pins, linkedin_post.
+    """
+
+    contenido, mod = generar_contenido(client, prompt, modelos)
+    
+    with open(ARCHIVO_JSON, "w", encoding="utf-8") as f: json.dump(contenido, f, indent=2)
+    
+    with open(ARCHIVO_TXT, "w", encoding="utf-8") as f:
+        f.write(f"=== TIKTOK/REELS ===\n{contenido.get('tiktok_data', {}).get('caption', '')}\n\n")
+        f.write(f"=== LINKEDIN ===\n{contenido.get('linkedin_post', '')}\n")
+    
+    guion = str(contenido.get("video_script", "")).strip()
+    hook = str(contenido.get("hook_text", "")).strip()
+    cta = str(contenido.get("cta_text", "")).strip()
+
+    fabricar_pines(contenido, nombre)
+    fabricar_video_mp4(guion, hook, cta)
+    log.info("🏁 Pipeline completado.")
+
+if __name__ == "__main__":
+    main()
