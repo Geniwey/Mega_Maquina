@@ -22,7 +22,7 @@ jobs:
           sudo apt-get install -y ffmpeg fonts-dejavu fonts-liberation
           pip install pandas groq requests edge-tts moviepy==1.0.3 pillow numpy
 
-      - name: 🚀 Ejecutar Agencia 360
+      - name: 🚀 Ejecutar Agencia 360 (Todo Español)
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
@@ -32,10 +32,10 @@ jobs:
       - name: 🗂️ Entregar Arsenal de Contenido
         uses: actions/upload-artifact@v4
         with:
-          name: Paquete_Omnicanal
+          name: Paquete_Omnicanal_ES
           path: |
-            *.mp4
-            *.pdf
-            *.jpg
+            video_final.mp4
+            ig_post_estatico.jpg
+            linkedin_carrusel.pdf
             TEXTOS_PARA_REDES.txt
             pines/
