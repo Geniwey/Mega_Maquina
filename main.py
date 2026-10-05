@@ -3,6 +3,7 @@ import io
 import sys
 import json
 import time
+import random
 import asyncio
 import logging
 import unicodedata
@@ -11,7 +12,7 @@ import pandas as pd
 from groq import Groq
 import edge_tts
 
-# --- PARCHE BLINDADO PARA EL ERROR DE ANTIALIAS ---
+# --- BLINDAJE ANTIALIAS PARA MOVIEPY ---
 import PIL.Image
 if not hasattr(PIL.Image, 'ANTIALIAS'):
     try:
@@ -19,7 +20,7 @@ if not hasattr(PIL.Image, 'ANTIALIAS'):
     except AttributeError:
         PIL.Image.ANTIALIAS = PIL.Image.LANCZOS
 
-from moviepy.editor import VideoFileClip, AudioFileClip, ColorClip
+from moviepy.editor import VideoFileClip, AudioFileClip
 
 # ---------------------------------------------------------------------------
 # CONFIGURACIÓN
@@ -109,10 +110,10 @@ def validar_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # ---------------------------------------------------------------------------
-# 2. RADAR DE MODELOS
+# 2. RADAR DE MODELOS PROFESIONAL
 # ---------------------------------------------------------------------------
 def obtener_mejor_modelo(client: Groq) -> str:
-    log.info("📡 Escaneando modelos disponibles HOY en Groq...")
+    log.info("📡 Escaneando inteligencia artificial disponible...")
     try:
         modelos_activos = [m.id for m in client.models.list().data]
         
@@ -127,24 +128,31 @@ def obtener_mejor_modelo(client: Groq) -> str:
         if not modelos_texto:
             raise ErrorFatal("Groq no devuelve modelos de texto válidos.")
 
+        # 1. Intentamos coger la élite
         preferencias = [
             "llama-3.3-70b-versatile",
             "llama-3.1-70b-versatile",
-            "llama-3.1-8b-instant",
             "mixtral-8x7b-32768"
         ]
-        
         for pref in preferencias:
             if pref in modelos_texto:
-                log.info(f"⭐ Radar fijado en el modelo élite: {pref}")
+                log.info(f"⭐ Radar fijado en el modelo principal: {pref}")
                 return pref
                 
-        for m in modelos_texto:
-            if 'llama' in m.lower():
-                log.warning(f"⚠️ Usando alternativa Llama detectada en vivo: {m}")
-                return m
+        # 2. Si Llama cambia de nombre, pillamos el más potente
+        llamas = [m for m in modelos_texto if 'llama' in m.lower()]
+        if llamas:
+            mejor_llama = sorted(llamas, key=lambda x: "70b" in x.lower(), reverse=True)[0]
+            log.info(f"⭐ Usando alternativa Llama detectada: {mejor_llama}")
+            return mejor_llama
+            
+        # 3. Si no hay Llama, pillamos Qwen (muy potente para español)
+        qwens = [m for m in modelos_texto if 'qwen' in m.lower()]
+        if qwens:
+            log.info(f"⭐ Usando motor Qwen de alta capacidad: {qwens[0]}")
+            return qwens[0]
                 
-        log.warning(f"⚠️ Usando modelo de rescate absoluto: {modelos_texto[0]}")
+        log.warning(f"⚠️ Usando motor estándar: {modelos_texto[0]}")
         return modelos_texto[0]
         
     except Exception as e:
@@ -153,7 +161,7 @@ def obtener_mejor_modelo(client: Groq) -> str:
 def generar_contenido(client: Groq, prompt: str, modelo_elegido: str) -> dict:
     for intento in range(1, MAX_REINTENTOS + 1):
         try:
-            log.info(f"🧠 Generando copy con {modelo_elegido} (intento {intento}/{MAX_REINTENTOS})...")
+            log.info(f"🧠 Generando copy experto con {modelo_elegido} (intento {intento}/{MAX_REINTENTOS})...")
             chat_completion = client.chat.completions.create(
                 messages=[{"role": "user", "content": prompt}],
                 model=modelo_elegido,
@@ -165,7 +173,7 @@ def generar_contenido(client: Groq, prompt: str, modelo_elegido: str) -> dict:
             for k in CLAVES_JSON_ESPERADAS:
                 if k not in datos:
                     raise ValueError(f"Falta clave JSON: {k}")
-            log.info("✅ JSON validado correctamente.")
+            log.info("✅ JSON transaccional validado correctamente.")
             return datos
         except Exception as e:
             log.warning(f"⚠️ Error en Groq: {e}")
@@ -174,45 +182,51 @@ def generar_contenido(client: Groq, prompt: str, modelo_elegido: str) -> dict:
     raise ErrorFatal("Groq falló tras varios reintentos.")
 
 # ---------------------------------------------------------------------------
-# 3. LA FÁBRICA VISUAL
+# 3. LA FÁBRICA VISUAL DINÁMICA (ANTI-BLOQUEOS Y SIN CHAPUZAS)
 # ---------------------------------------------------------------------------
 async def generar_voz_audio(texto: str, archivo_salida: str):
-    log.info("🎙️ Sintetizando voz en off profesional (Edge TTS)...")
+    log.info("🎙️ Sintetizando voz en off B2B (Edge TTS)...")
     comunicador = edge_tts.Communicate(texto, "es-ES-AlvaroNeural")
     await comunicador.save(archivo_salida)
-    log.info("✅ Audio de voz generado.")
+    log.info("✅ Audio de voz corporativo generado.")
 
 def fabricar_video_mp4(script_texto: str):
     audio_path = "temp_voice.mp3"
     asyncio.run(generar_voz_audio(script_texto, audio_path))
     
-    log.info("🎬 Generando fondo y renderizando vídeo MP4 con MoviePy...")
+    log.info("🎬 Seleccionando y descargando vídeo de fondo profesional...")
     
-    bg_url = "https://assets.mixkit.co/videos/preview/mixkit-cargo-ship-in-the-sea-41584-large.mp4"
-    bg_path = "temp_bg.mp4"
+    # Repositorio de vídeos de Wikimedia Commons (Cero 403, libres de derechos, temática puertos/barcos)
+    videos_logistica = [
+        "https://upload.wikimedia.org/wikipedia/commons/transcoded/9/90/Container_ship_leaves_port.webm/Container_ship_leaves_port.webm.720p.vp9.webm",
+        "https://upload.wikimedia.org/wikipedia/commons/transcoded/1/1d/Port_of_Rotterdam.webm/Port_of_Rotterdam.webm.720p.vp9.webm",
+        "https://upload.wikimedia.org/wikipedia/commons/transcoded/8/86/Container_terminal_at_night.webm/Container_terminal_at_night.webm.480p.vp9.webm"
+    ]
+    
+    # Elegimos un vídeo al azar para que el contenido de TikTok sea variado cada día
+    bg_url = random.choice(videos_logistica)
+    bg_path = "temp_bg.webm"
     
     audio_clip = AudioFileClip(audio_path)
     duracion = audio_clip.duration
     
-    video_fondo = None
-    
     try:
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
-        resp = requests.get(bg_url, headers=headers, stream=True, timeout=15)
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+        resp = requests.get(bg_url, headers=headers, stream=True, timeout=30)
         resp.raise_for_status()
         with open(bg_path, "wb") as f:
             for chunk in resp.iter_content(chunk_size=1024):
                 if chunk:
                     f.write(chunk)
+        
         video_fondo = VideoFileClip(bg_path).subclip(0, min(duracion, 60))
-        log.info("✅ Vídeo de barcos descargado con éxito.")
+        log.info("✅ Vídeo de logística descargado con éxito desde servidor libre.")
     except Exception as e:
-        log.warning(f"⚠️ Mixkit bloqueó la descarga. Usando fondo oscuro corporativo... {e}")
-        video_fondo = ColorClip(size=(1080, 1920), color=(15, 23, 42), duration=duracion)
-        log.info("✅ Fondo sólido generado.")
+        raise ErrorFatal(f"Error descargando el vídeo fuente: {e}")
         
     video_fondo = video_fondo.set_audio(audio_clip)
     
+    log.info("⚙️ Renderizando MP4 final para TikTok/Reels...")
     video_fondo.write_videofile(
         ARCHIVO_VIDEO,
         fps=24,
@@ -227,13 +241,13 @@ def fabricar_video_mp4(script_texto: str):
     if os.path.exists(audio_path): os.remove(audio_path)
     if os.path.exists(bg_path): os.remove(bg_path)
     
-    log.info(f"✅ ¡Vídeo fabricado con éxito: {ARCHIVO_VIDEO}!")
+    log.info(f"✅ ¡Vídeo profesional fabricado con éxito: {ARCHIVO_VIDEO}!")
 
 # ---------------------------------------------------------------------------
 # MAIN
 # ---------------------------------------------------------------------------
 def main():
-    log.info("🚀 Arrancando la Mega Máquina (Fase Vídeo)...")
+    log.info("🚀 Arrancando la Mega Máquina de Contenido...")
     api_key = os.environ.get("GROQ_API_KEY")
     if not api_key:
         raise ErrorFatal("Falta GROQ_API_KEY en los Secrets.")
@@ -246,7 +260,7 @@ def main():
     palabra_clave = prod["PALABRA_CLAVE_MANYCHAT"]
     enlace = prod["ENLACE_HOTMART"]
 
-    log.info(f"🎯 Producto seleccionado: {nombre}")
+    log.info(f"🎯 Producto seleccionado hoy: {nombre}")
 
     client = Groq(api_key=api_key, timeout=TIMEOUT_GROQ_SEG, max_retries=0)
     
@@ -269,11 +283,11 @@ video_script, tiktok_data (caption, hashtags), ig_reel_data (caption, hashtags),
     guion_voz = contenido["video_script"]
     fabricar_video_mp4(guion_voz)
 
-    log.info("🏁 Pipeline completo de texto y vídeo finalizado.")
+    log.info("🏁 Pipeline completo y profesional finalizado.")
 
 if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        log.error(f"❌ ERROR: {e}")
+        log.error(f"❌ ERROR FATAL: {e}")
         sys.exit(1)
