@@ -142,7 +142,7 @@ def generar_contenido(client: Groq, prompt: str):
     raise ErrorFatal("Colapso de la IA.")
 
 # ---------------------------------------------------------------------------
-# 3. UTILIDADES PILLOW (PUESTO A PUNTO PARA MÁXIMA NITIDEZ)
+# 3. UTILIDADES PILLOW
 # ---------------------------------------------------------------------------
 def cargar_fuente(tam: int):
     for ruta in FUENTES:
@@ -171,7 +171,6 @@ def render_texto_rgba(texto, ancho, tam, color=(255, 255, 255, 255), stroke=0, f
     y = pad
     for linea in lineas:
         w = d.textlength(linea, font=fuente)
-        # Sombra paralela simulada para destacar el subtítulo
         d.text(((ancho - w) / 2 + 4, y + 4), linea, font=fuente, fill=(0, 0, 0, 220))
         d.text(((ancho - w) / 2, y), linea, font=fuente, fill=color, stroke_width=stroke, stroke_fill=(0, 0, 0, 255))
         y += alto_linea
@@ -181,7 +180,7 @@ def render_texto_rgba(texto, ancho, tam, color=(255, 255, 255, 255), stroke=0, f
 # 4. GENERADORES VISUALES (PINES, IG POST, PDF LINKEDIN)
 # ---------------------------------------------------------------------------
 def generar_pines(contenido: dict):
-    os.makedirs(CARPETA_PINES, exist_ok=True)
+    os.makedirs(CARPETA_PINES, exist_ok=True) # <--- AQUÍ ESTABA EL FALLO DE DIRECTORIO
     pines = contenido.get("pinterest_pins", [])
     if isinstance(pines, dict): pines = list(pines.values())
     if not isinstance(pines, list): pines = []
@@ -193,7 +192,7 @@ def generar_pines(contenido: dict):
                              headers={"Authorization": os.environ.get("PEXELS_API_KEY")}, timeout=15)
             fotos = r.json().get("photos", [])
             url = random.choice(fotos)["src"]["large2x"] if fotos else None
-            img = Image.open(requests.get(url, stream=True).raw).convert("RGB").resize((1080, 1920), Image.ANTIALIAS) if url else Image.new("RGB", (1080, 1920), (20, 30, 60))
+            img = Image.open(io.BytesIO(requests.get(url, stream=True).content)).convert("RGB").resize((1080, 1920), Image.ANTIALIAS) if url else Image.new("RGB", (1080, 1920), (20, 30, 60))
         except:
             img = Image.new("RGB", (1080, 1920), (20, 30, 60))
             
@@ -202,7 +201,6 @@ def generar_pines(contenido: dict):
         
         titulo = str(p.get("title", p.get("text_on_image", "IMPORTACIÓN"))).upper()
         
-        # Centrar texto del pin
         fuente = cargar_fuente(80)
         lineas = ajustar_lineas(draw, titulo, fuente, 900)
         y = 700 - (len(lineas) * 50)
@@ -221,7 +219,7 @@ def generar_post_ig(contenido: dict):
                          headers={"Authorization": os.environ.get("PEXELS_API_KEY")}, timeout=15)
         fotos = r.json().get("photos", [])
         url = random.choice(fotos)["src"]["large2x"] if fotos else None
-        img = Image.open(requests.get(url, stream=True).raw).convert("RGB").resize((1080, 1080), Image.ANTIALIAS) if url else Image.new("RGB", (1080, 1080), (15, 23, 42))
+        img = Image.open(io.BytesIO(requests.get(url, stream=True).content)).convert("RGB").resize((1080, 1080), Image.ANTIALIAS) if url else Image.new("RGB", (1080, 1080), (15, 23, 42))
     except:
         img = Image.new("RGB", (1080, 1080), (15, 23, 42))
         
@@ -263,7 +261,7 @@ def generar_pdf_linkedin(contenido: dict):
         log.info("💼 PDF LinkedIn generado.")
 
 # ---------------------------------------------------------------------------
-# 5. MONTAJE DE VÍDEO CON ZOOM CONTINUO Y BARRA DE PROGRESO
+# 5. MONTAJE DE VÍDEO
 # ---------------------------------------------------------------------------
 async def generar_audio(texto: str, archivo: str) -> list:
     com = edge_tts.Communicate(texto, "es-ES-AlvaroNeural", rate="+6%", boundary="WordBoundary")
@@ -304,7 +302,6 @@ def montar_video(script: str, hook: str, archivo_salida: str):
     base = []
     for r in rutas:
         try:
-            # MAGIA DEL ZOOM IN CONTINUO (Efecto Dron Profesional)
             clip = VideoFileClip(r).without_audio().resize(height=1920).crop(x_center=960, width=1080)
             clip = clip.resize(lambda t: 1 + 0.03 * (t / clip.duration)) 
             base.append(clip)
@@ -347,7 +344,6 @@ def montar_video(script: str, hook: str, archivo_salida: str):
         arr = render_texto_rgba(t, 980, 110, c, 6)
         capas.append(ImageClip(arr).set_start(ini).set_duration(fin-ini).set_position(("center", "center")))
 
-    # BARRA DE PROGRESO SUPERIOR (Dinámica)
     def make_barra(t):
         w_barra = int(1080 * (t / dur))
         img = Image.new("RGBA", (1080, 12), (0,0,0,0))
