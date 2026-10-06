@@ -180,7 +180,7 @@ def render_texto_rgba(texto, ancho, tam, color=(255, 255, 255, 255), stroke=0, f
 # 4. GENERADORES VISUALES (PINES, IG POST, PDF LINKEDIN)
 # ---------------------------------------------------------------------------
 def generar_pines(contenido: dict):
-    os.makedirs(CARPETA_PINES, exist_ok=True) # <--- AQUÍ ESTABA EL FALLO DE DIRECTORIO
+    os.makedirs(CARPETA_PINES, exist_ok=True)
     pines = contenido.get("pinterest_pins", [])
     if isinstance(pines, dict): pines = list(pines.values())
     if not isinstance(pines, list): pines = []
@@ -200,7 +200,6 @@ def generar_pines(contenido: dict):
         draw = ImageDraw.Draw(img)
         
         titulo = str(p.get("title", p.get("text_on_image", "IMPORTACIÓN"))).upper()
-        
         fuente = cargar_fuente(80)
         lineas = ajustar_lineas(draw, titulo, fuente, 900)
         y = 700 - (len(lineas) * 50)
@@ -261,7 +260,7 @@ def generar_pdf_linkedin(contenido: dict):
         log.info("💼 PDF LinkedIn generado.")
 
 # ---------------------------------------------------------------------------
-# 5. MONTAJE DE VÍDEO
+# 5. MONTAJE DE VÍDEO (CORREGIDO RGB DE BARRA)
 # ---------------------------------------------------------------------------
 async def generar_audio(texto: str, archivo: str) -> list:
     com = edge_tts.Communicate(texto, "es-ES-AlvaroNeural", rate="+6%", boundary="WordBoundary")
@@ -344,11 +343,12 @@ def montar_video(script: str, hook: str, archivo_salida: str):
         arr = render_texto_rgba(t, 980, 110, c, 6)
         capas.append(ImageClip(arr).set_start(ini).set_duration(fin-ini).set_position(("center", "center")))
 
+    # BARRA DE PROGRESO CORREGIDA A RGB (Adiós error de shape)
     def make_barra(t):
         w_barra = int(1080 * (t / dur))
-        img = Image.new("RGBA", (1080, 12), (0,0,0,0))
+        img = Image.new("RGB", (1080, 12), (0, 0, 0))
         d = ImageDraw.Draw(img)
-        d.rectangle([0, 0, w_barra, 10], fill=(255, 196, 0, 255))
+        d.rectangle([0, 0, w_barra, 10], fill=(255, 196, 0))
         return np.array(img)
     
     barra_clip = VideoClip(make_barra, duration=dur).set_position(("left", "top"))
@@ -364,7 +364,7 @@ def montar_video(script: str, hook: str, archivo_salida: str):
 # MAIN
 # ---------------------------------------------------------------------------
 def main():
-    log.info("🚀 Arrancando Agencia 360 (Versión de Élite)...")
+    log.info("🚀 Arrancando Agencia 360 (Versión de Élite Corregida)...")
     api_key = os.environ.get("GROQ_API_KEY")
     if not api_key: raise ErrorFatal("Falta GROQ_API_KEY.")
 
@@ -406,7 +406,7 @@ def main():
     generar_post_ig(contenido)
     generar_pdf_linkedin(contenido)
 
-    log.info("🎞️ Renderizando MP4 de Élite con Zoom y Barra de Progreso...")
+    log.info("🎞️ Renderizando MP4 de Élite...")
     guion = str(contenido.get("video_script", f"Problemas logísticos. Comenta {palabra}"))
     hook = str(contenido.get("hook_text", ""))
     
