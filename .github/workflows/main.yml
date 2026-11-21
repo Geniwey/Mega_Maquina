@@ -20,7 +20,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg fonts-dejavu fonts-liberation
-          pip install pandas groq requests edge-tts moviepy==1.0.3 pillow numpy
+          pip install pandas groq requests edge-tts moviepy==1.0.3 pillow numpy google-api-python-client google-auth-oauthlib
 
       - name: 🚀 Ejecutar Agencia 360 (Todo Español)
         env:
@@ -28,6 +28,15 @@ jobs:
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
         run: |
           python main.py
+
+      - name: 📺 Publicar Short en YouTube
+        continue-on-error: true
+        env:
+          YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
+          YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
+          YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
+        run: |
+          python subir_youtube.py
 
       - name: 🗂️ Entregar Arsenal de Contenido
         uses: actions/upload-artifact@v4
@@ -38,4 +47,5 @@ jobs:
             ig_post_estatico.jpg
             linkedin_carrusel.pdf
             TEXTOS_PARA_REDES.txt
+            metadatos_redes.json
             pines/
